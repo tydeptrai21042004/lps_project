@@ -26,6 +26,13 @@ def accuracy_from_logits(logits: torch.Tensor, targets: torch.Tensor) -> float:
     return (logits.argmax(dim=1) == targets).float().mean().item()
 
 
+def _has_nonfinite_gradients(model: nn.Module) -> bool:
+    for p in model.parameters():
+        if p.grad is not None and not torch.isfinite(p.grad).all():
+            return True
+    return False
+
+
 def run_epoch(
     model: nn.Module,
     loader,
@@ -33,10 +40,13 @@ def run_epoch(
     optimizer,
     device: torch.device,
     grad_clip: float | None = None,
+    skip_nonfinite_batches: bool = True,
+    log_prefix: str = "",
 ) -> EpochMetrics:
     model.train()
     loss_meter = AverageMeter()
     acc_meter = AverageMeter()
+    skipped_batches = 0
 
     for batch_idx, (x, y) in enumerate(loader):
         x = x.to(device, non_blocking=True)
@@ -46,27 +56,63 @@ def run_epoch(
 
         logits = model(x)
         if not torch.isfinite(logits).all():
+            if skip_nonfinite_batches:
+                skipped_batches += 1
+                optimizer.zero_grad(set_to_none=True)
+                print(f"{log_prefix}[warn] skipped batch {batch_idx}: non-finite logits")
+                continue
             raise RuntimeError(f"Non-finite logits at batch {batch_idx}")
 
         loss = criterion(logits, y)
         if not torch.isfinite(loss):
+            if skip_nonfinite_batches:
+                skipped_batches += 1
+                optimizer.zero_grad(set_to_none=True)
+                print(f"{log_prefix}[warn] skipped batch {batch_idx}: non-finite loss")
+                continue
             raise RuntimeError(f"Non-finite loss at batch {batch_idx}")
 
         loss.backward()
 
+        if _has_nonfinite_gradients(model):
+            if skip_nonfinite_batches:
+                skipped_batches += 1
+                optimizer.zero_grad(set_to_none=True)
+                print(f"{log_prefix}[warn] skipped batch {batch_idx}: non-finite gradients after backward")
+                continue
+            raise RuntimeError(f"Non-finite gradients at batch {batch_idx}")
+
         if grad_clip is not None:
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             if not torch.isfinite(grad_norm):
+                if skip_nonfinite_batches:
+                    skipped_batches += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    print(f"{log_prefix}[warn] skipped batch {batch_idx}: non-finite grad norm ({grad_norm})")
+                    continue
                 raise RuntimeError(f"Non-finite grad norm at batch {batch_idx}: {grad_norm}")
 
         optimizer.step()
 
+        bad_param = False
         for name, p in model.named_parameters():
             if p is not None and not torch.isfinite(p).all():
+                bad_param = True
+                if skip_nonfinite_batches:
+                    skipped_batches += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    print(f"{log_prefix}[warn] parameter became non-finite after step: {name}")
+                    break
                 raise RuntimeError(f"Non-finite parameter after step: {name}")
+
+        if bad_param:
+            continue
 
         loss_meter.update(loss.item(), x.size(0))
         acc_meter.update(accuracy_from_logits(logits, y), x.size(0))
+
+    if skipped_batches > 0:
+        print(f"{log_prefix}[info] skipped_batches={skipped_batches}")
 
     return EpochMetrics(loss=loss_meter.avg, acc=acc_meter.avg)
 
