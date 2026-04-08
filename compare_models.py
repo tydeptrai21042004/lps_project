@@ -3,12 +3,142 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import statistics
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 
 DATASET_CHOICES = ['seqmnist', 'fashion_mnist', 'kmnist', 'emnist_digits', 'cifar10_gray']
+
+
+PER_RUN_COLUMNS = [
+    'dataset',
+    'model',
+    'seed',
+    'best_epoch',
+    'best_val_acc',
+    'test_acc',
+    'test_loss',
+    'shift_mean_logit_l2',
+    'shift_prediction_consistency',
+    'parameter_count',
+]
+
+
+AGG_COLUMNS = [
+    'model',
+    'runs',
+    'best_val_acc_mean',
+    'best_val_acc_std',
+    'test_acc_mean',
+    'test_acc_std',
+    'test_loss_mean',
+    'test_loss_std',
+    'shift_mean_logit_l2_mean',
+    'shift_prediction_consistency_mean',
+    'parameter_count',
+]
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return float('nan')
+    return result if math.isfinite(result) else float('nan')
+
+
+def _mean(values: list[float]) -> float:
+    finite_values = [v for v in values if math.isfinite(v)]
+    if not finite_values:
+        return float('nan')
+    return statistics.fmean(finite_values)
+
+
+def _std(values: list[float]) -> float:
+    finite_values = [v for v in values if math.isfinite(v)]
+    if len(finite_values) < 2:
+        return 0.0 if finite_values else float('nan')
+    return statistics.stdev(finite_values)
+
+
+def _format_cell(value: Any) -> str:
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return 'nan'
+        if abs(value) >= 1000:
+            return f'{value:.2f}'
+        if abs(value) >= 1:
+            return f'{value:.4f}'
+        return f'{value:.6f}'
+    return str(value)
+
+
+def _print_table(title: str, rows: list[dict[str, Any]], columns: list[str]) -> None:
+    print(f'\n{title}')
+    if not rows:
+        print('(no rows)')
+        return
+
+    widths: dict[str, int] = {}
+    for col in columns:
+        widths[col] = len(col)
+        for row in rows:
+            widths[col] = max(widths[col], len(_format_cell(row.get(col, ''))))
+
+    sep = '+-' + '-+-'.join('-' * widths[col] for col in columns) + '-+'
+    header = '| ' + ' | '.join(col.ljust(widths[col]) for col in columns) + ' |'
+
+    print(sep)
+    print(header)
+    print(sep)
+    for row in rows:
+        print('| ' + ' | '.join(_format_cell(row.get(col, '')).ljust(widths[col]) for col in columns) + ' |')
+    print(sep)
+
+
+def _aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row['model']), []).append(row)
+
+    summary_rows: list[dict[str, Any]] = []
+    for model, model_rows in grouped.items():
+        best_val_accs = [_safe_float(r.get('best_val_acc')) for r in model_rows]
+        test_accs = [_safe_float(r.get('test_acc')) for r in model_rows]
+        test_losses = [_safe_float(r.get('test_loss')) for r in model_rows]
+        shift_l2s = [_safe_float(r.get('shift_mean_logit_l2')) for r in model_rows]
+        shift_cons = [_safe_float(r.get('shift_prediction_consistency')) for r in model_rows]
+        param_counts = [int(r.get('parameter_count', 0)) for r in model_rows if r.get('parameter_count') is not None]
+
+        summary_rows.append(
+            {
+                'model': model,
+                'runs': len(model_rows),
+                'best_val_acc_mean': _mean(best_val_accs),
+                'best_val_acc_std': _std(best_val_accs),
+                'test_acc_mean': _mean(test_accs),
+                'test_acc_std': _std(test_accs),
+                'test_loss_mean': _mean(test_losses),
+                'test_loss_std': _std(test_losses),
+                'shift_mean_logit_l2_mean': _mean(shift_l2s),
+                'shift_prediction_consistency_mean': _mean(shift_cons),
+                'parameter_count': max(param_counts) if param_counts else 0,
+            }
+        )
+
+    summary_rows.sort(key=lambda row: (_safe_float(row['test_acc_mean']), _safe_float(row['best_val_acc_mean'])), reverse=True)
+    return summary_rows
+
+
+def _save_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    with path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def main() -> None:
@@ -36,7 +166,7 @@ def main() -> None:
     models = [m.strip() for m in args.models.split(',') if m.strip()]
     seeds = [int(s.strip()) for s in args.seeds.split(',') if s.strip()]
 
-    rows = []
+    rows: list[dict[str, Any]] = []
     for model in models:
         for seed in seeds:
             run_dir = output_dir / f'{args.dataset}_{model}_seed{seed}'
@@ -65,30 +195,45 @@ def main() -> None:
             print('Running:', ' '.join(cmd))
             subprocess.run(cmd, check=True, cwd=project_root)
 
-            with (run_dir / 'summary.json').open('r', encoding='utf-8') as f:
+            summary_path = run_dir / 'summary.json'
+            if not summary_path.exists():
+                raise FileNotFoundError(f'Missing summary file: {summary_path}')
+
+            with summary_path.open('r', encoding='utf-8') as f:
                 summary = json.load(f)
-            rows.append(
-                {
-                    'dataset': summary['dataset'],
-                    'model': summary['model'],
-                    'seed': summary['seed'],
-                    'best_epoch': summary['best_epoch'],
-                    'best_val_acc': summary['best_val_acc'],
-                    'test_acc': summary['test_acc'],
-                    'test_loss': summary['test_loss'],
-                    'shift_mean_logit_l2': summary['shift_mean_logit_l2'],
-                    'shift_prediction_consistency': summary['shift_prediction_consistency'],
-                    'parameter_count': summary['parameter_count'],
-                }
-            )
+
+            row = {
+                'dataset': summary['dataset'],
+                'model': summary['model'],
+                'seed': summary['seed'],
+                'best_epoch': summary['best_epoch'],
+                'best_val_acc': summary['best_val_acc'],
+                'test_acc': summary['test_acc'],
+                'test_loss': summary['test_loss'],
+                'shift_mean_logit_l2': summary['shift_mean_logit_l2'],
+                'shift_prediction_consistency': summary['shift_prediction_consistency'],
+                'parameter_count': summary['parameter_count'],
+            }
+            rows.append(row)
+
+            _print_table('Completed runs so far', rows, PER_RUN_COLUMNS)
+
+    if not rows:
+        raise RuntimeError('No runs were completed, so there is nothing to summarize.')
+
+    rows.sort(key=lambda row: (_safe_float(row['test_acc']), _safe_float(row['best_val_acc'])), reverse=True)
+    agg_rows = _aggregate_rows(rows)
 
     csv_path = output_dir / 'comparison.csv'
-    with csv_path.open('w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
+    summary_csv_path = output_dir / 'comparison_summary.csv'
+    _save_csv(csv_path, rows, PER_RUN_COLUMNS)
+    _save_csv(summary_csv_path, agg_rows, AGG_COLUMNS)
 
-    print(f'Saved comparison table to {csv_path}')
+    _print_table('Final per-run results', rows, PER_RUN_COLUMNS)
+    _print_table('Final summary by model', agg_rows, AGG_COLUMNS)
+
+    print(f'\nSaved per-run comparison table to {csv_path}')
+    print(f'Saved aggregated summary table to {summary_csv_path}')
 
 
 if __name__ == '__main__':
