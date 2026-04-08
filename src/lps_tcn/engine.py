@@ -69,6 +69,17 @@ def _tensor_stats(t: torch.Tensor) -> str:
     )
 
 
+def _nonfinite_channel_hint(param_name: str, t: torch.Tensor) -> str:
+    if not param_name.endswith('weight_v') or t.ndim < 2:
+        return ''
+    flat = t.detach().reshape(t.shape[0], -1)
+    bad = ~torch.isfinite(flat).all(dim=1)
+    bad_idx = torch.nonzero(bad, as_tuple=False).flatten().tolist()
+    if not bad_idx:
+        return ''
+    return f' bad_output_channels={bad_idx}'
+
+
 def _global_grad_norm(model: nn.Module) -> float:
     total_sq = 0.0
     for p in model.parameters():
@@ -134,6 +145,7 @@ def run_epoch(
     device: torch.device,
     grad_clip: float | None = None,
     skip_nonfinite_batches: bool = True,
+    max_consecutive_skips: int | None = 10,
     log_prefix: str = '',
     debug_cfg: DebugConfig | None = None,
 ) -> EpochMetrics:
@@ -147,6 +159,7 @@ def run_epoch(
     grad_norm_max = 0.0
     debug_printed = 0
     total_batches = 0
+    consecutive_skips = 0
 
     for batch_idx, (x, y) in enumerate(loader):
         total_batches += 1
@@ -159,7 +172,12 @@ def run_epoch(
         if not torch.isfinite(logits).all():
             if skip_nonfinite_batches:
                 skipped_batches += 1
+                consecutive_skips += 1
                 print(f"{log_prefix}[warn] skipped batch {batch_idx}: non-finite logits | {_tensor_stats(logits.detach())}")
+                if max_consecutive_skips is not None and consecutive_skips >= max_consecutive_skips:
+                    raise RuntimeError(
+                        f'Too many consecutive skipped batches ({consecutive_skips}) due to non-finite logits'
+                    )
                 continue
             raise RuntimeError(f'Non-finite logits at batch {batch_idx}')
 
@@ -167,7 +185,12 @@ def run_epoch(
         if not torch.isfinite(loss):
             if skip_nonfinite_batches:
                 skipped_batches += 1
+                consecutive_skips += 1
                 print(f"{log_prefix}[warn] skipped batch {batch_idx}: non-finite loss={loss.item()}")
+                if max_consecutive_skips is not None and consecutive_skips >= max_consecutive_skips:
+                    raise RuntimeError(
+                        f'Too many consecutive skipped batches ({consecutive_skips}) due to non-finite loss'
+                    )
                 continue
             raise RuntimeError(f'Non-finite loss at batch {batch_idx}')
 
@@ -177,12 +200,19 @@ def run_epoch(
         if grad_name is not None:
             if skip_nonfinite_batches:
                 skipped_batches += 1
+                consecutive_skips += 1
                 optimizer.zero_grad(set_to_none=True)
+                channel_hint = _nonfinite_channel_hint(grad_name, bad_grad.detach())
                 print(
                     f"{log_prefix}[warn] skipped batch {batch_idx}: non-finite gradients after backward | "
-                    f"param={grad_name} grad_stats=({_tensor_stats(bad_grad.detach())}) "
+                    f"param={grad_name} grad_stats=({_tensor_stats(bad_grad.detach())})"
+                    f"{channel_hint} "
                     f"loss={loss.item():.6f} logits_stats=({_tensor_stats(logits.detach())})"
                 )
+                if max_consecutive_skips is not None and consecutive_skips >= max_consecutive_skips:
+                    raise RuntimeError(
+                        f'Too many consecutive skipped batches ({consecutive_skips}) due to non-finite gradients at {grad_name}'
+                    )
                 continue
             raise RuntimeError(f'Non-finite gradients at batch {batch_idx}: {grad_name}')
 
@@ -216,8 +246,13 @@ def run_epoch(
             if not torch.isfinite(clipped_grad_norm):
                 if skip_nonfinite_batches:
                     skipped_batches += 1
+                    consecutive_skips += 1
                     optimizer.zero_grad(set_to_none=True)
                     print(f"{log_prefix}[warn] skipped batch {batch_idx}: non-finite grad norm after clipping ({clipped_grad_norm})")
+                    if max_consecutive_skips is not None and consecutive_skips >= max_consecutive_skips:
+                        raise RuntimeError(
+                            f'Too many consecutive skipped batches ({consecutive_skips}) due to non-finite clipped grad norm'
+                        )
                     continue
                 raise RuntimeError(f'Non-finite grad norm at batch {batch_idx}: {clipped_grad_norm}')
 
@@ -227,14 +262,20 @@ def run_epoch(
         if bad_param_name is not None:
             if skip_nonfinite_batches:
                 skipped_batches += 1
+                consecutive_skips += 1
                 optimizer.zero_grad(set_to_none=True)
                 print(
                     f"{log_prefix}[warn] parameter became non-finite after step: {bad_param_name} "
                     f"param_stats=({_tensor_stats(bad_param.detach())})"
                 )
+                if max_consecutive_skips is not None and consecutive_skips >= max_consecutive_skips:
+                    raise RuntimeError(
+                        f'Too many consecutive skipped batches ({consecutive_skips}) due to non-finite parameter {bad_param_name}'
+                    )
                 continue
             raise RuntimeError(f'Non-finite parameter after step: {bad_param_name}')
 
+        consecutive_skips = 0
         loss_meter.update(loss.item(), x.size(0))
         acc_meter.update(accuracy_from_logits(logits, y), x.size(0))
 
@@ -272,6 +313,7 @@ def evaluate(model: nn.Module, loader, criterion, device: torch.device) -> Epoch
         if not torch.isfinite(loss):
             raise RuntimeError('Non-finite loss during evaluation')
 
+        consecutive_skips = 0
         loss_meter.update(loss.item(), x.size(0))
         acc_meter.update(accuracy_from_logits(logits, y), x.size(0))
 

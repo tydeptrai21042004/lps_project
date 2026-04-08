@@ -52,15 +52,16 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument('--channels', type=str, default='25,25,25,25,25,25,25,25')
     parser.add_argument('--tcn-kernel-size', type=int, default=7)
     parser.add_argument('--dropout', type=float, default=0.05)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--weight-decay', type=float, default=1e-4)
-    parser.add_argument('--grad-clip', type=float, default=1.0)
+    parser.add_argument('--grad-clip', type=float, default=0.5)
     parser.add_argument('--scheduler', type=str, default='cosine', choices=['none', 'cosine'])
-    parser.add_argument('--optimizer-eps', type=float, default=1e-8)
-    parser.add_argument('--use-weight-norm', action='store_true', default=True)
+    parser.add_argument('--optimizer-eps', type=float, default=1e-6)
+    parser.add_argument('--use-weight-norm', action='store_true', default=False)
     parser.add_argument('--no-weight-norm', dest='use_weight_norm', action='store_false')
     parser.add_argument('--skip-nonfinite-batches', action='store_true', default=True)
     parser.add_argument('--no-skip-nonfinite-batches', dest='skip_nonfinite_batches', action='store_false')
+    parser.add_argument('--max-consecutive-skips', type=int, default=10)
 
     parser.add_argument('--front-k', type=int, default=9)
     parser.add_argument('--front-h', type=float, default=1.0)
@@ -198,6 +199,7 @@ def main() -> None:
             device,
             grad_clip=args.grad_clip,
             skip_nonfinite_batches=args.skip_nonfinite_batches,
+            max_consecutive_skips=args.max_consecutive_skips,
             debug_cfg=debug_cfg,
         )
         val_metrics = evaluate(model, data.val_loader, criterion, device)

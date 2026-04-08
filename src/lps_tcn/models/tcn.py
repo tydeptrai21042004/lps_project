@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from torch.nn.utils import weight_norm
+
+try:
+    from torch.nn.utils.parametrizations import weight_norm as apply_weight_norm
+except ImportError:
+    from torch.nn.utils import weight_norm as apply_weight_norm
 
 from .frontends import FixedSmoother1d
 
@@ -16,6 +20,12 @@ class Chomp1d(nn.Module):
         return x[:, :, :-self.chomp_size].contiguous() if self.chomp_size > 0 else x
 
 
+def _init_tcn_conv(conv: nn.Conv1d, std: float = 0.01) -> None:
+    nn.init.normal_(conv.weight, mean=0.0, std=std)
+    if conv.bias is not None:
+        nn.init.zeros_(conv.bias)
+
+
 def make_conv1d(
     in_channels: int,
     out_channels: int,
@@ -23,7 +33,7 @@ def make_conv1d(
     stride: int,
     padding: int,
     dilation: int,
-    use_weight_norm: bool = True,
+    use_weight_norm: bool = False,
 ) -> nn.Module:
     conv = nn.Conv1d(
         in_channels,
@@ -33,19 +43,15 @@ def make_conv1d(
         padding=padding,
         dilation=dilation,
     )
-    nn.init.kaiming_normal_(conv.weight, nonlinearity="relu")
-    if conv.bias is not None:
-        nn.init.zeros_(conv.bias)
-    return weight_norm(conv) if use_weight_norm else conv
+    _init_tcn_conv(conv, std=0.01)
+    return apply_weight_norm(conv, name="weight", dim=0) if use_weight_norm else conv
 
 
 def make_downsample(in_channels: int, out_channels: int) -> nn.Module | None:
     if in_channels == out_channels:
         return None
     conv = nn.Conv1d(in_channels, out_channels, kernel_size=1)
-    nn.init.kaiming_normal_(conv.weight, nonlinearity="linear")
-    if conv.bias is not None:
-        nn.init.zeros_(conv.bias)
+    _init_tcn_conv(conv, std=0.01)
     return conv
 
 
@@ -59,7 +65,7 @@ class TemporalBlock(nn.Module):
         dilation: int,
         padding: int,
         dropout: float,
-        use_weight_norm: bool = True,
+        use_weight_norm: bool = False,
     ):
         super().__init__()
 
@@ -107,7 +113,7 @@ class SmoothedTemporalBlock(nn.Module):
         dropout: float,
         smoother_kernel_size: int = 5,
         smoother_type: str = "moving_avg",
-        use_weight_norm: bool = True,
+        use_weight_norm: bool = False,
     ) -> None:
         super().__init__()
 
@@ -170,7 +176,7 @@ class TemporalConvNet(nn.Module):
         channels: list[int],
         kernel_size: int = 7,
         dropout: float = 0.05,
-        use_weight_norm: bool = True,
+        use_weight_norm: bool = False,
         block_cls: type[nn.Module] = TemporalBlock,
         block_kwargs: dict | None = None,
     ) -> None:
@@ -210,7 +216,7 @@ class TCNBackboneClassifier(nn.Module):
         tcn_kernel_size: int,
         dropout: float,
         frontend: nn.Module | None = None,
-        use_weight_norm: bool = True,
+        use_weight_norm: bool = False,
         pooling: str = "last",
         smoothed: bool = False,
         smoothed_smoother_type: str = "moving_avg",
@@ -243,6 +249,9 @@ class TCNBackboneClassifier(nn.Module):
 
         head_in = tcn_channels[-1]
         self.head = nn.Linear(head_in, n_classes)
+        nn.init.normal_(self.head.weight, mean=0.0, std=0.01)
+        if self.head.bias is not None:
+            nn.init.zeros_(self.head.bias)
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         x = self.frontend(x)

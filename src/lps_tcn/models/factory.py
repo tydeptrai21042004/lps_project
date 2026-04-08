@@ -37,7 +37,7 @@ class ModelConfig:
     fcn_kernel_sizes: tuple[int, ...] = (8, 5, 3)
     smoothed_tcn_smoother: str = "moving_avg"
     smoothed_tcn_kernel_size: int = 5
-    use_weight_norm: bool = True
+    use_weight_norm: bool = False
     pooling: str = "last"
 
 
