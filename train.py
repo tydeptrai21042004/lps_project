@@ -8,85 +8,96 @@ import torch
 import torch.nn as nn
 
 from src.lps_tcn.analysis import collect_frontend_diagnostics
-from src.lps_tcn.data import build_seqmnist_loaders
-from src.lps_tcn.engine import CSVLogger, evaluate, evaluate_shift_stability, run_epoch
+from src.lps_tcn.data import build_sequence_loaders
+from src.lps_tcn.engine import CSVLogger, DebugConfig, evaluate, evaluate_shift_stability, run_epoch
 from src.lps_tcn.models.factory import ModelConfig, build_model
 from src.lps_tcn.utils import count_parameters, ensure_dir, save_json, set_seed
 
 
+DATASET_CHOICES = ['seqmnist', 'fashion_mnist', 'kmnist', 'emnist_digits', 'cifar10_gray']
+MODEL_CHOICES = [
+    'tcn_plain',
+    'smoothed_tcn',
+    'lps_conv',
+    'lps_conv_plus',
+    'gaussian_tcn',
+    'hamming_tcn',
+    'savgol_tcn',
+    'moving_avg_tcn',
+    'lstm',
+    'bilstm',
+    'gru',
+    'bigru',
+    'fcn',
+]
+
+
 def parse_channels(text: str) -> tuple[int, ...]:
-    return tuple(int(v.strip()) for v in text.split(",") if v.strip())
+    return tuple(int(v.strip()) for v in text.split(',') if v.strip())
 
 
 def make_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train and compare LPS-TCN with strong baselines.")
-    parser.add_argument("--data-root", type=str, default="./data")
-    parser.add_argument("--output-dir", type=str, default="./outputs/run")
-    parser.add_argument("--seed", type=int, default=1111)
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--val-ratio", type=float, default=0.1)
-    parser.add_argument("--permute", action="store_true")
+    parser = argparse.ArgumentParser(description='Train and compare LPS-TCN with strong baselines.')
+    parser.add_argument('--data-root', type=str, default='./data')
+    parser.add_argument('--output-dir', type=str, default='./outputs/run')
+    parser.add_argument('--dataset', type=str, default='seqmnist', choices=DATASET_CHOICES)
+    parser.add_argument('--seed', type=int, default=1111)
+    parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--num-workers', type=int, default=2)
+    parser.add_argument('--val-ratio', type=float, default=0.1)
+    parser.add_argument('--permute', action='store_true')
 
+    parser.add_argument('--model', type=str, default='lps_conv_plus', choices=MODEL_CHOICES)
+    parser.add_argument('--channels', type=str, default='25,25,25,25,25,25,25,25')
+    parser.add_argument('--tcn-kernel-size', type=int, default=7)
+    parser.add_argument('--dropout', type=float, default=0.05)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--weight-decay', type=float, default=1e-4)
+    parser.add_argument('--grad-clip', type=float, default=1.0)
+    parser.add_argument('--scheduler', type=str, default='cosine', choices=['none', 'cosine'])
+    parser.add_argument('--optimizer-eps', type=float, default=1e-8)
+    parser.add_argument('--use-weight-norm', action='store_true', default=True)
+    parser.add_argument('--no-weight-norm', dest='use_weight_norm', action='store_false')
+    parser.add_argument('--skip-nonfinite-batches', action='store_true', default=True)
+    parser.add_argument('--no-skip-nonfinite-batches', dest='skip_nonfinite_batches', action='store_false')
+
+    parser.add_argument('--front-k', type=int, default=9)
+    parser.add_argument('--front-h', type=float, default=1.0)
+    parser.add_argument('--causal', action='store_true', default=True)
+    parser.add_argument('--non-causal', dest='causal', action='store_false')
+    parser.add_argument('--front-residual', action='store_true', default=True)
+    parser.add_argument('--no-front-residual', dest='front_residual', action='store_false')
+    parser.add_argument('--use-relu', action='store_true', default=True)
+    parser.add_argument('--no-relu', dest='use_relu', action='store_false')
+    parser.add_argument('--dc-mode', type=str, default='project', choices=['none', 'project'])
+    parser.add_argument('--kernel-init', type=str, default='identity', choices=['identity', 'gaussian', 'kaiming'])
+    parser.add_argument('--normalize-kernel-dc', action='store_true')
+    parser.add_argument('--gate-init', type=float, default=-4.0)
+
+    parser.add_argument('--lstm-hidden-size', type=int, default=128)
+    parser.add_argument('--lstm-layers', type=int, default=2)
+    parser.add_argument('--lstm-bidirectional', action='store_true')
+    parser.add_argument('--gru-hidden-size', type=int, default=128)
+    parser.add_argument('--gru-layers', type=int, default=2)
+    parser.add_argument('--gru-bidirectional', action='store_true')
+    parser.add_argument('--fcn-channels', type=str, default='128,256,128')
+    parser.add_argument('--fcn-kernel-sizes', type=str, default='8,5,3')
     parser.add_argument(
-        "--model",
+        '--smoothed-tcn-smoother',
         type=str,
-        default="lps_conv_plus",
-        choices=[
-            "tcn_plain",
-            "smoothed_tcn",
-            "lps_conv",
-            "lps_conv_plus",
-            "gaussian_tcn",
-            "hamming_tcn",
-            "savgol_tcn",
-            "moving_avg_tcn",
-            "lstm",
-            "bilstm",
-            "gru",
-            "bigru",
-            "fcn",
-        ],
+        default='moving_avg',
+        choices=['moving_avg', 'gaussian', 'hamming', 'savgol'],
     )
-    parser.add_argument("--channels", type=str, default="25,25,25,25,25,25,25,25")
-    parser.add_argument("--tcn-kernel-size", type=int, default=7)
-    parser.add_argument("--dropout", type=float, default=0.05)
-    parser.add_argument("--lr", type=float, default=2e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--scheduler", type=str, default="cosine", choices=["none", "cosine"])
+    parser.add_argument('--smoothed-tcn-kernel-size', type=int, default=5)
 
-    parser.add_argument("--front-k", type=int, default=9)
-    parser.add_argument("--front-h", type=float, default=1.0)
-    parser.add_argument("--causal", action="store_true", default=True)
-    parser.add_argument("--non-causal", dest="causal", action="store_false")
-    parser.add_argument("--front-residual", action="store_true", default=True)
-    parser.add_argument("--no-front-residual", dest="front_residual", action="store_false")
-    parser.add_argument("--use-relu", action="store_true", default=True)
-    parser.add_argument("--no-relu", dest="use_relu", action="store_false")
-    parser.add_argument("--dc-mode", type=str, default="project", choices=["none", "project"])
-    parser.add_argument("--kernel-init", type=str, default="identity", choices=["identity", "gaussian", "kaiming"])
-    parser.add_argument("--normalize-kernel-dc", action="store_true")
-    parser.add_argument("--gate-init", type=float, default=-4.0)
-
-    parser.add_argument("--lstm-hidden-size", type=int, default=128)
-    parser.add_argument("--lstm-layers", type=int, default=2)
-    parser.add_argument("--lstm-bidirectional", action="store_true")
-    parser.add_argument("--gru-hidden-size", type=int, default=128)
-    parser.add_argument("--gru-layers", type=int, default=2)
-    parser.add_argument("--gru-bidirectional", action="store_true")
-    parser.add_argument("--fcn-channels", type=str, default="128,256,128")
-    parser.add_argument("--fcn-kernel-sizes", type=str, default="8,5,3")
-    parser.add_argument(
-        "--smoothed-tcn-smoother",
-        type=str,
-        default="moving_avg",
-        choices=["moving_avg", "gaussian", "hamming", "savgol"],
-    )
-    parser.add_argument("--smoothed-tcn-kernel-size", type=int, default=5)
-
-    parser.add_argument("--shift-batches", type=int, default=20)
+    parser.add_argument('--shift-batches', type=int, default=20)
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--debug-every', type=int, default=50)
+    parser.add_argument('--debug-max-batches', type=int, default=10)
+    parser.add_argument('--debug-parameter-stats', action='store_true')
+    parser.add_argument('--debug-activation-stats', action='store_true')
+    parser.add_argument('--detect-anomaly', action='store_true')
     return parser
 
 
@@ -94,11 +105,15 @@ def main() -> None:
     args = make_parser().parse_args()
     output_dir = ensure_dir(args.output_dir)
     set_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    data = build_seqmnist_loaders(
+    if args.detect_anomaly:
+        torch.autograd.set_detect_anomaly(True)
+
+    data = build_sequence_loaders(
         data_root=args.data_root,
         batch_size=args.batch_size,
+        dataset_name=args.dataset,
         permute=args.permute,
         seed=args.seed,
         val_ratio=args.val_ratio,
@@ -131,25 +146,48 @@ def main() -> None:
         fcn_kernel_sizes=parse_channels(args.fcn_kernel_sizes),
         smoothed_tcn_smoother=args.smoothed_tcn_smoother,
         smoothed_tcn_kernel_size=args.smoothed_tcn_kernel_size,
+        use_weight_norm=args.use_weight_norm,
     )
     model = build_model(model_cfg).to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        eps=args.optimizer_eps,
+    )
     scheduler = None
-    if args.scheduler == "cosine":
+    if args.scheduler == 'cosine':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     param_count = count_parameters(model)
-    csv_logger = CSVLogger(output_dir / "history.csv")
-    checkpoint_path = output_dir / "best.pt"
+    csv_logger = CSVLogger(output_dir / 'history.csv', overwrite=True)
+    checkpoint_path = output_dir / 'best.pt'
+
+    debug_cfg = DebugConfig(
+        enabled=args.debug,
+        debug_every=args.debug_every,
+        debug_max_batches=args.debug_max_batches,
+        print_parameter_stats=args.debug_parameter_stats,
+        print_activation_stats=args.debug_activation_stats,
+    )
 
     best_val_acc = -1.0
-    best_val_loss = float("inf")
+    best_val_loss = float('inf')
     best_epoch = 0
 
-    print(f"model={args.model} device={device} params={param_count:,}")
-    print(f"output_dir={output_dir}")
+    print(f'model={args.model} device={device} params={param_count:,}')
+    print(
+        f'dataset={data.dataset_name} permute={args.permute} '
+        f'seq_len={data.seq_len} n_classes={data.n_classes} '
+        f'train/val/test={data.train_size}/{data.val_size}/{data.test_size}'
+    )
+    print(
+        f'optimizer=Adam lr={args.lr} weight_decay={args.weight_decay} eps={args.optimizer_eps} '
+        f'grad_clip={args.grad_clip} use_weight_norm={args.use_weight_norm}'
+    )
+    print(f'output_dir={output_dir}')
 
     for epoch in range(1, args.epochs + 1):
         train_metrics = run_epoch(
@@ -159,18 +197,24 @@ def main() -> None:
             optimizer,
             device,
             grad_clip=args.grad_clip,
+            skip_nonfinite_batches=args.skip_nonfinite_batches,
+            debug_cfg=debug_cfg,
         )
         val_metrics = evaluate(model, data.val_loader, criterion, device)
         if scheduler is not None:
             scheduler.step()
 
         row = {
-            "epoch": epoch,
-            "lr": optimizer.param_groups[0]["lr"],
-            "train_loss": train_metrics.loss,
-            "train_acc": train_metrics.acc,
-            "val_loss": val_metrics.loss,
-            "val_acc": val_metrics.acc,
+            'epoch': epoch,
+            'lr': optimizer.param_groups[0]['lr'],
+            'train_loss': train_metrics.loss,
+            'train_acc': train_metrics.acc,
+            'val_loss': val_metrics.loss,
+            'val_acc': val_metrics.acc,
+            'train_skipped_batches': train_metrics.skipped_batches,
+            'train_total_batches': train_metrics.total_batches,
+            'train_mean_grad_norm': train_metrics.mean_grad_norm,
+            'train_max_grad_norm': train_metrics.max_grad_norm,
         }
         csv_logger.log(row)
 
@@ -183,11 +227,11 @@ def main() -> None:
             best_epoch = epoch
             torch.save(
                 {
-                    "model_state_dict": model.state_dict(),
-                    "model_config": asdict(model_cfg),
-                    "epoch": epoch,
-                    "best_val_acc": best_val_acc,
-                    "best_val_loss": best_val_loss,
+                    'model_state_dict': model.state_dict(),
+                    'model_config': asdict(model_cfg),
+                    'epoch': epoch,
+                    'best_val_acc': best_val_acc,
+                    'best_val_loss': best_val_loss,
                 },
                 checkpoint_path,
             )
@@ -196,38 +240,50 @@ def main() -> None:
             f"epoch={epoch:03d} "
             f"train_loss={train_metrics.loss:.4f} train_acc={train_metrics.acc:.4f} "
             f"val_loss={val_metrics.loss:.4f} val_acc={val_metrics.acc:.4f} "
-            f"best_val_acc={best_val_acc:.4f}"
+            f"best_val_acc={best_val_acc:.4f} "
+            f"skipped={train_metrics.skipped_batches}/{train_metrics.total_batches} "
+            f"mean_grad_norm={train_metrics.mean_grad_norm:.4e} max_grad_norm={train_metrics.max_grad_norm:.4e}"
         )
 
     ckpt = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(ckpt['model_state_dict'])
     test_metrics = evaluate(model, data.test_loader, criterion, device)
     shift_metrics = evaluate_shift_stability(model, data.test_loader, device, max_batches=args.shift_batches)
     diagnostics = collect_frontend_diagnostics(model)
 
     summary = {
-        "model": args.model,
-        "seed": args.seed,
-        "best_epoch": best_epoch,
-        "best_val_acc": best_val_acc,
-        "best_val_loss": best_val_loss,
-        "test_acc": test_metrics.acc,
-        "test_loss": test_metrics.loss,
-        "shift_mean_logit_l2": shift_metrics.mean_logit_l2,
-        "shift_prediction_consistency": shift_metrics.mean_prediction_consistency,
-        "parameter_count": param_count,
-        "config": vars(args),
-        "frontend_diagnostics": diagnostics,
+        'model': args.model,
+        'dataset': data.dataset_name,
+        'seed': args.seed,
+        'best_epoch': best_epoch,
+        'best_val_acc': best_val_acc,
+        'best_val_loss': best_val_loss,
+        'test_acc': test_metrics.acc,
+        'test_loss': test_metrics.loss,
+        'shift_mean_logit_l2': shift_metrics.mean_logit_l2,
+        'shift_prediction_consistency': shift_metrics.mean_prediction_consistency,
+        'parameter_count': param_count,
+        'config': vars(args),
+        'data': {
+            'dataset_name': data.dataset_name,
+            'input_channels': data.input_channels,
+            'n_classes': data.n_classes,
+            'seq_len': data.seq_len,
+            'train_size': data.train_size,
+            'val_size': data.val_size,
+            'test_size': data.test_size,
+        },
+        'frontend_diagnostics': diagnostics,
     }
-    save_json(output_dir / "summary.json", summary)
+    save_json(output_dir / 'summary.json', summary)
 
-    print("\nFinished.")
-    print(f"best_epoch={best_epoch}")
-    print(f"test_acc={test_metrics.acc:.4f}")
-    print(f"test_loss={test_metrics.loss:.4f}")
-    print(f"shift_mean_logit_l2={shift_metrics.mean_logit_l2:.4f}")
-    print(f"shift_prediction_consistency={shift_metrics.mean_prediction_consistency:.4f}")
+    print('\nFinished.')
+    print(f'best_epoch={best_epoch}')
+    print(f'test_acc={test_metrics.acc:.4f}')
+    print(f'test_loss={test_metrics.loss:.4f}')
+    print(f'shift_mean_logit_l2={shift_metrics.mean_logit_l2:.4f}')
+    print(f'shift_prediction_consistency={shift_metrics.mean_prediction_consistency:.4f}')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
