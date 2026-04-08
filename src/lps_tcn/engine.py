@@ -275,7 +275,6 @@ def run_epoch(
                 continue
             raise RuntimeError(f'Non-finite parameter after step: {bad_param_name}')
 
-        consecutive_skips = 0
         loss_meter.update(loss.item(), x.size(0))
         acc_meter.update(accuracy_from_logits(logits, y), x.size(0))
 
@@ -313,7 +312,6 @@ def evaluate(model: nn.Module, loader, criterion, device: torch.device) -> Epoch
         if not torch.isfinite(loss):
             raise RuntimeError('Non-finite loss during evaluation')
 
-        consecutive_skips = 0
         loss_meter.update(loss.item(), x.size(0))
         acc_meter.update(accuracy_from_logits(logits, y), x.size(0))
 
