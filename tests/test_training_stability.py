@@ -13,11 +13,14 @@ import torch.nn as nn
 from torch.autograd import Function
 from torch.utils.data import DataLoader, TensorDataset
 
-from train import make_parser
+from train import apply_model_family_defaults, make_parser
 
 torch.set_num_threads(1)
+
+from src.lps_tcn.data import build_sequence_loaders
 from src.lps_tcn.engine import run_epoch
-from src.lps_tcn.models.factory import ModelConfig, build_model
+from src.lps_tcn.models.factory import MODEL_CHOICES, ModelConfig, build_model
+from src.lps_tcn.models.frontends import FixedSmoother1d, LPSConvPlus
 from src.lps_tcn.utils import set_seed
 
 
@@ -70,6 +73,17 @@ class TrainingStabilityTests(unittest.TestCase):
         self.assertAlmostEqual(args.grad_clip, 0.5)
         self.assertAlmostEqual(args.optimizer_eps, 1e-6)
         self.assertEqual(args.max_consecutive_skips, 10)
+
+    def test_family_defaults_upgrade_rnn_and_ms_model(self) -> None:
+        args = make_parser().parse_args(['--model', 'lps_conv_plus_ms'])
+        args = apply_model_family_defaults(args)
+        self.assertEqual(args.front_multiscale_kernels, '5,9,17')
+        self.assertTrue(args.front_use_se)
+        self.assertTrue(args.front_per_channel_gate)
+
+        rnn_args = make_parser().parse_args(['--model', 'lstm', '--rnn-pooling', 'last'])
+        rnn_args = apply_model_family_defaults(rnn_args)
+        self.assertEqual(rnn_args.rnn_pooling, 'mean')
 
     def test_default_tcn_plain_has_no_weight_norm_parameters(self) -> None:
         model = build_model(
@@ -137,6 +151,66 @@ class TrainingStabilityTests(unittest.TestCase):
                 skip_nonfinite_batches=True,
                 max_consecutive_skips=3,
             )
+
+    def test_all_models_forward_shapes(self) -> None:
+        x = torch.randn(3, 2, 96)
+        for model_name in MODEL_CHOICES:
+            cfg = ModelConfig(
+                model_name=model_name,
+                input_channels=2,
+                n_classes=4,
+                tcn_channels=(8, 8),
+                tcn_kernel_size=5,
+                dropout=0.0,
+                front_kernel=5,
+                front_kernel2=5,
+                lstm_hidden_size=16,
+                gru_hidden_size=16,
+                rnn_proj_channels=4,
+                front_multiscale_kernels=(3, 5, 7),
+            )
+            model = build_model(cfg)
+            y = model(x)
+            self.assertEqual(tuple(y.shape), (3, 4), msg=f'model {model_name}')
+
+    def test_savgol_dtype_matches_input_dtype(self) -> None:
+        module = FixedSmoother1d(channels=1, kernel_size=5, smoother_type='savgol', causal=False)
+        x = torch.randn(2, 1, 32, dtype=torch.float32)
+        y = module(x)
+        self.assertEqual(y.dtype, torch.float32)
+
+    def test_synthetic_dataset_loader_and_standardization(self) -> None:
+        bundle = build_sequence_loaders(
+            data_root='./data',
+            batch_size=16,
+            dataset_name='synthetic_multiscale',
+            permute=False,
+            seed=1234,
+            val_ratio=0.1,
+            num_workers=0,
+        )
+        xb, yb = next(iter(bundle.train_loader))
+        self.assertEqual(xb.ndim, 3)
+        self.assertEqual(xb.shape[1], 3)
+        self.assertEqual(bundle.n_classes, 4)
+        self.assertEqual(bundle.seq_len, 160)
+        self.assertTrue(abs(float(xb.mean())) < 0.5)
+        self.assertEqual(yb.ndim, 1)
+
+    def test_multiscale_lps_conv_plus_preserves_shape(self) -> None:
+        module = LPSConvPlus(
+            channels=3,
+            kernel_size1=5,
+            kernel_size2=5,
+            branch_kernel_sizes=(5, 9, 13),
+            use_se=True,
+            per_channel_gate=True,
+            branch_dropout=0.1,
+        )
+        x = torch.randn(2, 3, 80)
+        y = module(x)
+        self.assertEqual(tuple(y.shape), tuple(x.shape))
+        self.assertEqual(tuple(module.beta.shape), (1, 3, 1))
 
 
 if __name__ == '__main__':

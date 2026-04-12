@@ -2,42 +2,62 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-from pathlib import Path
 
 import torch
 import torch.nn as nn
 
 from src.lps_tcn.analysis import collect_frontend_diagnostics
-from src.lps_tcn.data import build_sequence_loaders
+from src.lps_tcn.data import DATASET_CHOICES, build_sequence_loaders
 from src.lps_tcn.engine import CSVLogger, DebugConfig, evaluate, evaluate_shift_stability, run_epoch
-from src.lps_tcn.models.factory import ModelConfig, build_model
+from src.lps_tcn.models.factory import MODEL_CHOICES, ModelConfig, build_model
 from src.lps_tcn.utils import count_parameters, ensure_dir, save_json, set_seed
 
 
-DATASET_CHOICES = ['seqmnist', 'fashion_mnist', 'kmnist', 'emnist_digits', 'cifar10_gray']
-MODEL_CHOICES = [
-    'tcn_plain',
-    'smoothed_tcn',
-    'lps_conv',
-    'lps_conv_plus',
-    'gaussian_tcn',
-    'hamming_tcn',
-    'savgol_tcn',
-    'moving_avg_tcn',
-    'lstm',
-    'bilstm',
-    'gru',
-    'bigru',
-    'fcn',
-]
-
-
 def parse_channels(text: str) -> tuple[int, ...]:
-    return tuple(int(v.strip()) for v in text.split(',') if v.strip())
+    values = [int(v.strip()) for v in text.split(',') if v.strip()]
+    if not values:
+        raise ValueError('Expected a comma-separated list of integers')
+    return tuple(values)
+
+
+def apply_model_family_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    args = argparse.Namespace(**vars(args))
+
+    if args.model in {'lstm', 'bilstm', 'gru', 'bigru'}:
+        if args.rnn_pooling == 'last':
+            args.rnn_pooling = 'mean'
+        if args.rnn_proj_channels <= 0:
+            args.rnn_proj_channels = 32
+        if args.dropout < 0.1:
+            args.dropout = 0.15
+
+    if args.model == 'fcn':
+        if args.fcn_channels == '128,256,128':
+            args.fcn_channels = '128,256,256'
+        if args.fcn_kernel_sizes == '8,5,3':
+            args.fcn_kernel_sizes = '11,7,5'
+        if args.dropout < 0.1:
+            args.dropout = 0.1
+
+    if args.model == 'lps_conv_plus_ms':
+        if args.front_multiscale_kernels == '':
+            args.front_multiscale_kernels = '5,9,17'
+        args.front_use_se = True
+        args.front_per_channel_gate = True
+        if args.front_branch_dropout < 0.05:
+            args.front_branch_dropout = 0.05
+
+    if args.dataset in {'ecg5000', 'synthetic_sines', 'synthetic_shiftmix', 'synthetic_multiscale'} and args.epochs < 30:
+        args.epochs = 30
+
+    if args.dataset in {'basicmotions'} and args.batch_size > 32:
+        args.batch_size = 32
+
+    return args
 
 
 def make_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Train and compare LPS-TCN with strong baselines.')
+    parser = argparse.ArgumentParser(description='Train and compare LPS-TCN with stronger baselines and richer datasets.')
     parser.add_argument('--data-root', type=str, default='./data')
     parser.add_argument('--output-dir', type=str, default='./outputs/run')
     parser.add_argument('--dataset', type=str, default='seqmnist', choices=DATASET_CHOICES)
@@ -49,9 +69,9 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument('--permute', action='store_true')
 
     parser.add_argument('--model', type=str, default='lps_conv_plus', choices=MODEL_CHOICES)
-    parser.add_argument('--channels', type=str, default='25,25,25,25,25,25,25,25')
+    parser.add_argument('--channels', type=str, default='32,32,32,32,32,32,32,32')
     parser.add_argument('--tcn-kernel-size', type=int, default=7)
-    parser.add_argument('--dropout', type=float, default=0.05)
+    parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument('--grad-clip', type=float, default=0.5)
@@ -64,6 +84,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument('--max-consecutive-skips', type=int, default=10)
 
     parser.add_argument('--front-k', type=int, default=9)
+    parser.add_argument('--front-k2', type=int, default=9)
     parser.add_argument('--front-h', type=float, default=1.0)
     parser.add_argument('--causal', action='store_true', default=True)
     parser.add_argument('--non-causal', dest='causal', action='store_false')
@@ -75,15 +96,21 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument('--kernel-init', type=str, default='identity', choices=['identity', 'gaussian', 'kaiming'])
     parser.add_argument('--normalize-kernel-dc', action='store_true')
     parser.add_argument('--gate-init', type=float, default=-4.0)
+    parser.add_argument('--front-multiscale-kernels', type=str, default='')
+    parser.add_argument('--front-use-se', action='store_true')
+    parser.add_argument('--front-per-channel-gate', action='store_true')
+    parser.add_argument('--front-branch-dropout', type=float, default=0.0)
 
-    parser.add_argument('--lstm-hidden-size', type=int, default=128)
+    parser.add_argument('--lstm-hidden-size', type=int, default=160)
     parser.add_argument('--lstm-layers', type=int, default=2)
     parser.add_argument('--lstm-bidirectional', action='store_true')
-    parser.add_argument('--gru-hidden-size', type=int, default=128)
+    parser.add_argument('--gru-hidden-size', type=int, default=160)
     parser.add_argument('--gru-layers', type=int, default=2)
     parser.add_argument('--gru-bidirectional', action='store_true')
-    parser.add_argument('--fcn-channels', type=str, default='128,256,128')
-    parser.add_argument('--fcn-kernel-sizes', type=str, default='8,5,3')
+    parser.add_argument('--rnn-pooling', type=str, default='mean', choices=['last', 'mean', 'max', 'attention'])
+    parser.add_argument('--rnn-proj-channels', type=int, default=32)
+    parser.add_argument('--fcn-channels', type=str, default='128,256,256')
+    parser.add_argument('--fcn-kernel-sizes', type=str, default='11,7,5')
     parser.add_argument(
         '--smoothed-tcn-smoother',
         type=str,
@@ -91,6 +118,7 @@ def make_parser() -> argparse.ArgumentParser:
         choices=['moving_avg', 'gaussian', 'hamming', 'savgol'],
     )
     parser.add_argument('--smoothed-tcn-kernel-size', type=int, default=5)
+    parser.add_argument('--pooling', type=str, default='mean', choices=['last', 'mean'])
 
     parser.add_argument('--shift-batches', type=int, default=20)
     parser.add_argument('--debug', action='store_true')
@@ -103,7 +131,7 @@ def make_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = make_parser().parse_args()
+    args = apply_model_family_defaults(make_parser().parse_args())
     output_dir = ensure_dir(args.output_dir)
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -121,6 +149,8 @@ def main() -> None:
         num_workers=args.num_workers,
     )
 
+    front_multiscale_kernels = parse_channels(args.front_multiscale_kernels) if args.front_multiscale_kernels else ()
+
     model_cfg = ModelConfig(
         model_name=args.model,
         input_channels=data.input_channels,
@@ -129,6 +159,7 @@ def main() -> None:
         tcn_kernel_size=args.tcn_kernel_size,
         dropout=args.dropout,
         front_kernel=args.front_k,
+        front_kernel2=args.front_k2,
         front_h=args.front_h,
         causal=args.causal,
         front_residual=args.front_residual,
@@ -143,11 +174,18 @@ def main() -> None:
         gru_hidden_size=args.gru_hidden_size,
         gru_layers=args.gru_layers,
         gru_bidirectional=args.gru_bidirectional,
+        rnn_pooling=args.rnn_pooling,
+        rnn_proj_channels=args.rnn_proj_channels,
         fcn_channels=parse_channels(args.fcn_channels),
         fcn_kernel_sizes=parse_channels(args.fcn_kernel_sizes),
         smoothed_tcn_smoother=args.smoothed_tcn_smoother,
         smoothed_tcn_kernel_size=args.smoothed_tcn_kernel_size,
         use_weight_norm=args.use_weight_norm,
+        pooling=args.pooling,
+        front_multiscale_kernels=front_multiscale_kernels,
+        front_use_se=args.front_use_se,
+        front_per_channel_gate=args.front_per_channel_gate,
+        front_branch_dropout=args.front_branch_dropout,
     )
     model = build_model(model_cfg).to(device)
 
@@ -278,13 +316,6 @@ def main() -> None:
         'frontend_diagnostics': diagnostics,
     }
     save_json(output_dir / 'summary.json', summary)
-
-    print('\nFinished.')
-    print(f'best_epoch={best_epoch}')
-    print(f'test_acc={test_metrics.acc:.4f}')
-    print(f'test_loss={test_metrics.loss:.4f}')
-    print(f'shift_mean_logit_l2={shift_metrics.mean_logit_l2:.4f}')
-    print(f'shift_prediction_consistency={shift_metrics.mean_prediction_consistency:.4f}')
 
 
 if __name__ == '__main__':

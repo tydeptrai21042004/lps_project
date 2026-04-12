@@ -10,8 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
-DATASET_CHOICES = ['seqmnist', 'fashion_mnist', 'kmnist', 'emnist_digits', 'cifar10_gray']
+from src.lps_tcn.data import DATASET_CHOICES
 
 
 PER_RUN_COLUMNS = [
@@ -25,12 +24,14 @@ PER_RUN_COLUMNS = [
     'shift_mean_logit_l2',
     'shift_prediction_consistency',
     'parameter_count',
+    'status',
 ]
 
 
 AGG_COLUMNS = [
     'model',
     'runs',
+    'successful_runs',
     'best_val_acc_mean',
     'best_val_acc_std',
     'test_acc_mean',
@@ -107,17 +108,19 @@ def _aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     summary_rows: list[dict[str, Any]] = []
     for model, model_rows in grouped.items():
-        best_val_accs = [_safe_float(r.get('best_val_acc')) for r in model_rows]
-        test_accs = [_safe_float(r.get('test_acc')) for r in model_rows]
-        test_losses = [_safe_float(r.get('test_loss')) for r in model_rows]
-        shift_l2s = [_safe_float(r.get('shift_mean_logit_l2')) for r in model_rows]
-        shift_cons = [_safe_float(r.get('shift_prediction_consistency')) for r in model_rows]
-        param_counts = [int(r.get('parameter_count', 0)) for r in model_rows if r.get('parameter_count') is not None]
+        ok_rows = [r for r in model_rows if r.get('status') == 'ok']
+        best_val_accs = [_safe_float(r.get('best_val_acc')) for r in ok_rows]
+        test_accs = [_safe_float(r.get('test_acc')) for r in ok_rows]
+        test_losses = [_safe_float(r.get('test_loss')) for r in ok_rows]
+        shift_l2s = [_safe_float(r.get('shift_mean_logit_l2')) for r in ok_rows]
+        shift_cons = [_safe_float(r.get('shift_prediction_consistency')) for r in ok_rows]
+        param_counts = [int(r.get('parameter_count', 0)) for r in ok_rows if r.get('parameter_count') is not None]
 
         summary_rows.append(
             {
                 'model': model,
                 'runs': len(model_rows),
+                'successful_runs': len(ok_rows),
                 'best_val_acc_mean': _mean(best_val_accs),
                 'best_val_acc_std': _std(best_val_accs),
                 'test_acc_mean': _mean(test_accs),
@@ -142,21 +145,22 @@ def _save_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Run a comparison suite across strong baselines and LPS variants.')
+    parser = argparse.ArgumentParser(description='Run a comparison suite across stronger baselines and LPS variants.')
     parser.add_argument('--project-root', type=str, default='.')
     parser.add_argument('--data-root', type=str, default='./data')
     parser.add_argument('--output-dir', type=str, default='./outputs/compare')
-    parser.add_argument('--dataset', type=str, default='seqmnist', choices=DATASET_CHOICES)
+    parser.add_argument('--dataset', type=str, default='ecg5000', choices=DATASET_CHOICES)
     parser.add_argument(
         '--models',
         type=str,
-        default='tcn_plain,smoothed_tcn,gaussian_tcn,savgol_tcn,lstm,gru,fcn,lps_conv_plus',
+        default='tcn_plain,smoothed_tcn,moving_avg_tcn,learnable_front_tcn,bilstm,bigru,fcn,lps_conv_plus,lps_conv_plus_ms',
         help='Comma-separated model names',
     )
     parser.add_argument('--seeds', type=str, default='1111,2222,3333')
-    parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--epochs', type=int, default=30)
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--permute', action='store_true')
+    parser.add_argument('--continue-on-error', action='store_true', default=True)
     args, unknown = parser.parse_known_args()
 
     project_root = Path(args.project_root).resolve()
@@ -193,29 +197,48 @@ def main() -> None:
             cmd.extend(unknown)
 
             print('Running:', ' '.join(cmd))
-            subprocess.run(cmd, check=True, cwd=project_root)
+            status = 'ok'
+            error_message = ''
+            try:
+                subprocess.run(cmd, check=True, cwd=project_root)
+            except subprocess.CalledProcessError as exc:
+                status = 'failed'
+                error_message = f'command exited with code {exc.returncode}'
+                if not args.continue_on_error:
+                    raise
 
             summary_path = run_dir / 'summary.json'
-            if not summary_path.exists():
-                raise FileNotFoundError(f'Missing summary file: {summary_path}')
-
-            with summary_path.open('r', encoding='utf-8') as f:
-                summary = json.load(f)
-
-            row = {
-                'dataset': summary['dataset'],
-                'model': summary['model'],
-                'seed': summary['seed'],
-                'best_epoch': summary['best_epoch'],
-                'best_val_acc': summary['best_val_acc'],
-                'test_acc': summary['test_acc'],
-                'test_loss': summary['test_loss'],
-                'shift_mean_logit_l2': summary['shift_mean_logit_l2'],
-                'shift_prediction_consistency': summary['shift_prediction_consistency'],
-                'parameter_count': summary['parameter_count'],
-            }
+            if status == 'ok' and summary_path.exists():
+                with summary_path.open('r', encoding='utf-8') as f:
+                    summary = json.load(f)
+                row = {
+                    'dataset': summary['dataset'],
+                    'model': summary['model'],
+                    'seed': summary['seed'],
+                    'best_epoch': summary['best_epoch'],
+                    'best_val_acc': summary['best_val_acc'],
+                    'test_acc': summary['test_acc'],
+                    'test_loss': summary['test_loss'],
+                    'shift_mean_logit_l2': summary['shift_mean_logit_l2'],
+                    'shift_prediction_consistency': summary['shift_prediction_consistency'],
+                    'parameter_count': summary['parameter_count'],
+                    'status': status,
+                }
+            else:
+                row = {
+                    'dataset': args.dataset,
+                    'model': model,
+                    'seed': seed,
+                    'best_epoch': '',
+                    'best_val_acc': float('nan'),
+                    'test_acc': float('nan'),
+                    'test_loss': float('nan'),
+                    'shift_mean_logit_l2': float('nan'),
+                    'shift_prediction_consistency': float('nan'),
+                    'parameter_count': 0,
+                    'status': error_message or status,
+                }
             rows.append(row)
-
             _print_table('Completed runs so far', rows, PER_RUN_COLUMNS)
 
     if not rows:
