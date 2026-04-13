@@ -178,6 +178,15 @@ def main() -> None:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    model_sets = {
+        'paper_compare': PAPER_BASELINE_MODELS + PROPOSAL_MODELS,
+        'paper_baselines': PAPER_BASELINE_MODELS,
+        'proposals': PROPOSAL_MODELS,
+        'ablations': ABLATION_MODELS,
+        'all': PAPER_BASELINE_MODELS + PROPOSAL_MODELS + ABLATION_MODELS,
+    }
+    models = [m.strip() for m in args.models.split(',') if m.strip()] if args.models else list(model_sets[args.model_set])
+
     if args.show_model_provenance:
         provenance_rows = []
         for model in models:
@@ -191,15 +200,6 @@ def main() -> None:
         _print_table('Model provenance', provenance_rows, ['model', 'kind', 'paper', 'note'])
         with (output_dir / 'model_provenance.json').open('w', encoding='utf-8') as f:
             json.dump(provenance_rows, f, indent=2)
-
-    model_sets = {
-        'paper_compare': PAPER_BASELINE_MODELS + PROPOSAL_MODELS,
-        'paper_baselines': PAPER_BASELINE_MODELS,
-        'proposals': PROPOSAL_MODELS,
-        'ablations': ABLATION_MODELS,
-        'all': PAPER_BASELINE_MODELS + PROPOSAL_MODELS + ABLATION_MODELS,
-    }
-    models = [m.strip() for m in args.models.split(',') if m.strip()] if args.models else list(model_sets[args.model_set])
     if not args.allow_nonpaper_models:
         bad = [m for m in models if MODEL_PAPER_SUPPORT.get(m, {}).get('kind') == 'ablation']
         if bad and args.model_set != 'ablations':
