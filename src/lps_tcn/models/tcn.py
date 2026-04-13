@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 try:
     from torch.nn.utils.parametrizations import weight_norm as apply_weight_norm
@@ -11,48 +12,74 @@ except ImportError:
 from .frontends import FixedSmoother1d
 
 
-class Chomp1d(nn.Module):
-    def __init__(self, chomp_size: int):
+class TemporalAttentionPooling(nn.Module):
+    def __init__(self, features: int) -> None:
         super().__init__()
-        self.chomp_size = chomp_size
+        self.score = nn.Linear(features, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x[:, :, :-self.chomp_size].contiguous() if self.chomp_size > 0 else x
+        # x: [N, C, T] -> [N, T, C]
+        xt = x.transpose(1, 2)
+        weights = torch.softmax(self.score(torch.tanh(xt)), dim=1)
+        return torch.sum(weights * xt, dim=1)
 
 
-def _init_tcn_conv(conv: nn.Conv1d, std: float = 0.01) -> None:
-    nn.init.normal_(conv.weight, mean=0.0, std=std)
-    if conv.bias is not None:
-        nn.init.zeros_(conv.bias)
+class TemporalConv1d(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int = 1,
+        dilation: int = 1,
+        *,
+        causal: bool = True,
+        use_weight_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        self.causal = causal
+        self.left_padding = dilation * (kernel_size - 1) if causal else 0
+        same_padding = dilation * (kernel_size - 1) // 2
+        conv = nn.Conv1d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding=0 if causal else same_padding,
+            dilation=dilation,
+        )
+        self._init_conv(conv)
+        self.conv = apply_weight_norm(conv, name="weight", dim=0) if use_weight_norm else conv
 
+    @staticmethod
+    def _init_conv(conv: nn.Conv1d, std: float = 0.01) -> None:
+        nn.init.normal_(conv.weight, mean=0.0, std=std)
+        if conv.bias is not None:
+            nn.init.zeros_(conv.bias)
 
-def make_conv1d(
-    in_channels: int,
-    out_channels: int,
-    kernel_size: int,
-    stride: int,
-    padding: int,
-    dilation: int,
-    use_weight_norm: bool = False,
-) -> nn.Module:
-    conv = nn.Conv1d(
-        in_channels,
-        out_channels,
-        kernel_size,
-        stride=stride,
-        padding=padding,
-        dilation=dilation,
-    )
-    _init_tcn_conv(conv, std=0.01)
-    return apply_weight_norm(conv, name="weight", dim=0) if use_weight_norm else conv
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.causal and self.left_padding > 0:
+            x = F.pad(x, (self.left_padding, 0))
+        return self.conv(x)
 
 
 def make_downsample(in_channels: int, out_channels: int) -> nn.Module | None:
     if in_channels == out_channels:
         return None
     conv = nn.Conv1d(in_channels, out_channels, kernel_size=1)
-    _init_tcn_conv(conv, std=0.01)
+    TemporalConv1d._init_conv(conv, std=0.01)
     return conv
+
+
+def make_norm(norm_type: str, channels: int) -> nn.Module:
+    norm_type = norm_type.lower()
+    if norm_type == "none":
+        return nn.Identity()
+    if norm_type == "batch":
+        return nn.BatchNorm1d(channels)
+    if norm_type == "group":
+        return nn.GroupNorm(1, channels)
+    raise ValueError(f"Unknown norm_type: {norm_type}")
 
 
 class TemporalBlock(nn.Module):
@@ -63,40 +90,54 @@ class TemporalBlock(nn.Module):
         kernel_size: int,
         stride: int,
         dilation: int,
-        padding: int,
         dropout: float,
+        *,
+        causal: bool = True,
         use_weight_norm: bool = False,
+        norm_type: str = "none",
     ):
         super().__init__()
 
-        self.conv1 = make_conv1d(
-            n_inputs, n_outputs, kernel_size,
-            stride=stride, padding=padding, dilation=dilation,
+        self.conv1 = TemporalConv1d(
+            n_inputs,
+            n_outputs,
+            kernel_size,
+            stride=stride,
+            dilation=dilation,
+            causal=causal,
             use_weight_norm=use_weight_norm,
         )
-        self.chomp1 = Chomp1d(padding)
+        self.norm1 = make_norm(norm_type, n_outputs)
         self.relu1 = nn.ReLU()
         self.drop1 = nn.Dropout(dropout)
 
-        self.conv2 = make_conv1d(
-            n_outputs, n_outputs, kernel_size,
-            stride=stride, padding=padding, dilation=dilation,
+        self.conv2 = TemporalConv1d(
+            n_outputs,
+            n_outputs,
+            kernel_size,
+            stride=stride,
+            dilation=dilation,
+            causal=causal,
             use_weight_norm=use_weight_norm,
         )
-        self.chomp2 = Chomp1d(padding)
+        self.norm2 = make_norm(norm_type, n_outputs)
         self.relu2 = nn.ReLU()
         self.drop2 = nn.Dropout(dropout)
-
-        self.net = nn.Sequential(
-            self.conv1, self.chomp1, self.relu1, self.drop1,
-            self.conv2, self.chomp2, self.relu2, self.drop2,
-        )
 
         self.downsample = make_downsample(n_inputs, n_outputs)
         self.relu = nn.ReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.net(x)
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out = self.relu1(out)
+        out = self.drop1(out)
+
+        out = self.conv2(out)
+        out = self.norm2(out)
+        out = self.relu2(out)
+        out = self.drop2(out)
+
         res = x if self.downsample is None else self.downsample(x)
         return self.relu(out + res)
 
@@ -109,11 +150,13 @@ class SmoothedTemporalBlock(nn.Module):
         kernel_size: int,
         stride: int,
         dilation: int,
-        padding: int,
         dropout: float,
+        *,
+        causal: bool = True,
         smoother_kernel_size: int = 5,
         smoother_type: str = "moving_avg",
         use_weight_norm: bool = False,
+        norm_type: str = "none",
     ) -> None:
         super().__init__()
 
@@ -121,31 +164,38 @@ class SmoothedTemporalBlock(nn.Module):
             channels=n_inputs,
             kernel_size=smoother_kernel_size,
             smoother_type=smoother_type,
-            causal=True,
+            causal=causal,
         )
         self.smooth2 = FixedSmoother1d(
             channels=n_outputs,
             kernel_size=smoother_kernel_size,
             smoother_type=smoother_type,
-            causal=True,
+            causal=causal,
         )
 
-        self.conv1 = make_conv1d(
-            n_inputs, n_outputs, kernel_size,
-            stride=stride, padding=padding, dilation=dilation,
+        self.conv1 = TemporalConv1d(
+            n_inputs,
+            n_outputs,
+            kernel_size,
+            stride=stride,
+            dilation=dilation,
+            causal=causal,
             use_weight_norm=use_weight_norm,
         )
-        self.conv2 = make_conv1d(
-            n_outputs, n_outputs, kernel_size,
-            stride=stride, padding=padding, dilation=dilation,
-            use_weight_norm=use_weight_norm,
-        )
-
-        self.chomp1 = Chomp1d(padding)
+        self.norm1 = make_norm(norm_type, n_outputs)
         self.relu1 = nn.ReLU()
         self.drop1 = nn.Dropout(dropout)
 
-        self.chomp2 = Chomp1d(padding)
+        self.conv2 = TemporalConv1d(
+            n_outputs,
+            n_outputs,
+            kernel_size,
+            stride=stride,
+            dilation=dilation,
+            causal=causal,
+            use_weight_norm=use_weight_norm,
+        )
+        self.norm2 = make_norm(norm_type, n_outputs)
         self.relu2 = nn.ReLU()
         self.drop2 = nn.Dropout(dropout)
 
@@ -155,13 +205,13 @@ class SmoothedTemporalBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.smooth1(x)
         out = self.conv1(out)
-        out = self.chomp1(out)
+        out = self.norm1(out)
         out = self.relu1(out)
         out = self.drop1(out)
 
         out = self.smooth2(out)
         out = self.conv2(out)
-        out = self.chomp2(out)
+        out = self.norm2(out)
         out = self.relu2(out)
         out = self.drop2(out)
 
@@ -176,7 +226,10 @@ class TemporalConvNet(nn.Module):
         channels: list[int],
         kernel_size: int = 7,
         dropout: float = 0.05,
+        *,
+        causal: bool = True,
         use_weight_norm: bool = False,
+        norm_type: str = "none",
         block_cls: type[nn.Module] = TemporalBlock,
         block_kwargs: dict | None = None,
     ) -> None:
@@ -194,9 +247,10 @@ class TemporalConvNet(nn.Module):
                     kernel_size,
                     stride=1,
                     dilation=dilation_size,
-                    padding=(kernel_size - 1) * dilation_size,
                     dropout=dropout,
+                    causal=causal,
                     use_weight_norm=use_weight_norm,
+                    norm_type=norm_type,
                     **block_kwargs,
                 )
             )
@@ -216,8 +270,12 @@ class TCNBackboneClassifier(nn.Module):
         tcn_kernel_size: int,
         dropout: float,
         frontend: nn.Module | None = None,
+        *,
+        causal: bool = True,
         use_weight_norm: bool = False,
+        norm_type: str = "none",
         pooling: str = "last",
+        head_dropout: float = 0.0,
         smoothed: bool = False,
         smoothed_smoother_type: str = "moving_avg",
         smoothed_kernel_size: int = 5,
@@ -238,25 +296,44 @@ class TCNBackboneClassifier(nn.Module):
             channels=tcn_channels,
             kernel_size=tcn_kernel_size,
             dropout=dropout,
+            causal=causal,
             use_weight_norm=use_weight_norm,
+            norm_type=norm_type,
             block_cls=block_cls,
             block_kwargs=block_kwargs,
         )
 
         self.pooling = pooling
-        if pooling not in {"last", "mean"}:
+        valid_pooling = {"last", "mean", "max", "meanmax", "attention"}
+        if pooling not in valid_pooling:
             raise ValueError(f"Unknown pooling: {pooling}")
 
         head_in = tcn_channels[-1]
+        self.attn_pool = None
+        if pooling == "attention":
+            self.attn_pool = TemporalAttentionPooling(head_in)
+        elif pooling == "meanmax":
+            head_in = head_in * 2
+
+        self.head_dropout = nn.Dropout(head_dropout) if head_dropout > 0 else nn.Identity()
         self.head = nn.Linear(head_in, n_classes)
-        nn.init.normal_(self.head.weight, mean=0.0, std=0.01)
+        nn.init.xavier_uniform_(self.head.weight)
         if self.head.bias is not None:
             nn.init.zeros_(self.head.bias)
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         x = self.frontend(x)
         y = self.tcn(x)
-        return y[:, :, -1] if self.pooling == "last" else y.mean(dim=-1)
+        if self.pooling == "last":
+            return y[:, :, -1]
+        if self.pooling == "mean":
+            return y.mean(dim=-1)
+        if self.pooling == "max":
+            return y.max(dim=-1).values
+        if self.pooling == "meanmax":
+            return torch.cat([y.mean(dim=-1), y.max(dim=-1).values], dim=1)
+        assert self.attn_pool is not None
+        return self.attn_pool(y)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.forward_features(x))
+        return self.head(self.head_dropout(self.forward_features(x)))

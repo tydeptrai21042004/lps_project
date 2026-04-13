@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.autograd import Function
 from torch.utils.data import DataLoader, TensorDataset
 
-from train import apply_model_family_defaults, make_parser
+from train import apply_model_family_defaults, compute_class_weights, make_parser
 
 torch.set_num_threads(1)
 
@@ -21,6 +21,7 @@ from src.lps_tcn.data import build_sequence_loaders
 from src.lps_tcn.engine import run_epoch
 from src.lps_tcn.models.factory import MODEL_CHOICES, ModelConfig, build_model
 from src.lps_tcn.models.frontends import FixedSmoother1d, LPSConvPlus
+from src.lps_tcn.models.tcn import TemporalConv1d
 from src.lps_tcn.utils import set_seed
 
 
@@ -73,6 +74,8 @@ class TrainingStabilityTests(unittest.TestCase):
         self.assertAlmostEqual(args.grad_clip, 0.5)
         self.assertAlmostEqual(args.optimizer_eps, 1e-6)
         self.assertEqual(args.max_consecutive_skips, 10)
+        self.assertEqual(args.class_weighting, 'auto')
+        self.assertEqual(args.norm_type, 'none')
 
     def test_family_defaults_upgrade_rnn_and_ms_model(self) -> None:
         args = make_parser().parse_args(['--model', 'lps_conv_plus_ms'])
@@ -84,6 +87,15 @@ class TrainingStabilityTests(unittest.TestCase):
         rnn_args = make_parser().parse_args(['--model', 'lstm', '--rnn-pooling', 'last'])
         rnn_args = apply_model_family_defaults(rnn_args)
         self.assertEqual(rnn_args.rnn_pooling, 'mean')
+
+    def test_tcn_strong_defaults_are_applied(self) -> None:
+        args = make_parser().parse_args(['--model', 'tcn_strong', '--dataset', 'ecg5000'])
+        args = apply_model_family_defaults(args)
+        self.assertEqual(args.channels, '64,64,64,64,64')
+        self.assertEqual(args.pooling, 'meanmax')
+        self.assertEqual(args.norm_type, 'batch')
+        self.assertFalse(args.causal)
+        self.assertEqual(args.class_weighting, 'balanced')
 
     def test_default_tcn_plain_has_no_weight_norm_parameters(self) -> None:
         model = build_model(
@@ -168,6 +180,7 @@ class TrainingStabilityTests(unittest.TestCase):
                 gru_hidden_size=16,
                 rnn_proj_channels=4,
                 front_multiscale_kernels=(3, 5, 7),
+                norm_type='batch',
             )
             model = build_model(cfg)
             y = model(x)
@@ -211,6 +224,42 @@ class TrainingStabilityTests(unittest.TestCase):
         y = module(x)
         self.assertEqual(tuple(y.shape), tuple(x.shape))
         self.assertEqual(tuple(module.beta.shape), (1, 3, 1))
+
+    def test_temporal_conv_causal_flag_changes_future_leakage(self) -> None:
+        x = torch.zeros(1, 1, 7)
+        x[0, 0, 3] = 1.0
+
+        causal = TemporalConv1d(1, 1, kernel_size=3, causal=True)
+        noncausal = TemporalConv1d(1, 1, kernel_size=3, causal=False)
+        with torch.no_grad():
+            causal.conv.weight.fill_(1.0)
+            causal.conv.bias.zero_()
+            noncausal.conv.weight.fill_(1.0)
+            noncausal.conv.bias.zero_()
+
+        y_causal = causal(x)
+        y_noncausal = noncausal(x)
+        self.assertAlmostEqual(float(y_causal[0, 0, 1].detach()), 0.0, places=6)
+        self.assertGreater(float(y_noncausal[0, 0, 2].detach()), 0.0)
+
+    def test_compute_class_weights_balances_minority_classes(self) -> None:
+        x = torch.randn(10, 1, 16)
+        y = torch.tensor([0, 0, 0, 0, 0, 0, 1, 1, 2, 2])
+        dataset = TensorDataset(x, y)
+        weights, counts = compute_class_weights(dataset, 3, mode='balanced')
+        self.assertEqual(counts, [6, 2, 2])
+        self.assertIsNotNone(weights)
+        assert weights is not None
+        self.assertLess(float(weights[0]), float(weights[1]))
+        self.assertLess(float(weights[0]), float(weights[2]))
+
+    def test_auto_class_weights_can_stay_disabled_for_balanced_data(self) -> None:
+        x = torch.randn(9, 1, 16)
+        y = torch.tensor([0, 0, 0, 1, 1, 1, 2, 2, 2])
+        dataset = TensorDataset(x, y)
+        weights, counts = compute_class_weights(dataset, 3, mode='auto', imbalance_threshold=1.5)
+        self.assertEqual(counts, [3, 3, 3])
+        self.assertIsNone(weights)
 
 
 if __name__ == '__main__':

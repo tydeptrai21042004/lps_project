@@ -153,7 +153,7 @@ def main() -> None:
     parser.add_argument(
         '--models',
         type=str,
-        default='tcn_plain,smoothed_tcn,moving_avg_tcn,learnable_front_tcn,bilstm,bigru,fcn,lps_conv_plus,lps_conv_plus_ms',
+        default='tcn_plain,tcn_bn,tcn_attn,tcn_strong,smoothed_tcn,moving_avg_tcn,learnable_front_tcn,bilstm,bigru,fcn,lps_conv_plus,lps_conv_plus_ms',
         help='Comma-separated model names',
     )
     parser.add_argument('--seeds', type=str, default='1111,2222,3333')

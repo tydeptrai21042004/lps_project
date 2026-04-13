@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch.nn as nn
 
@@ -17,6 +17,9 @@ from .tcn import TCNBackboneClassifier
 
 MODEL_CHOICES = (
     'tcn_plain',
+    'tcn_bn',
+    'tcn_attn',
+    'tcn_strong',
     'smoothed_tcn',
     'gaussian_tcn',
     'hamming_tcn',
@@ -66,7 +69,9 @@ class ModelConfig:
     smoothed_tcn_smoother: str = 'moving_avg'
     smoothed_tcn_kernel_size: int = 5
     use_weight_norm: bool = False
+    norm_type: str = 'none'
     pooling: str = 'mean'
+    head_dropout: float = 0.0
     front_multiscale_kernels: tuple[int, ...] = ()
     front_use_se: bool = False
     front_per_channel_gate: bool = False
@@ -88,8 +93,11 @@ def _build_tcn(
         tcn_kernel_size=cfg.tcn_kernel_size,
         dropout=cfg.dropout,
         frontend=frontend,
+        causal=cfg.causal,
         use_weight_norm=cfg.use_weight_norm,
+        norm_type=cfg.norm_type,
         pooling=cfg.pooling,
+        head_dropout=cfg.head_dropout,
         smoothed=smoothed,
         smoothed_smoother_type=smoothed_smoother_type,
         smoothed_kernel_size=smoothed_kernel_size,
@@ -99,6 +107,31 @@ def _build_tcn(
 def build_model(cfg: ModelConfig) -> nn.Module:
     if cfg.model_name == 'tcn_plain':
         return _build_tcn(cfg)
+
+    if cfg.model_name == 'tcn_bn':
+        return _build_tcn(replace(cfg, norm_type='batch'))
+
+    if cfg.model_name == 'tcn_attn':
+        return _build_tcn(replace(cfg, causal=False, norm_type='batch', pooling='attention', head_dropout=max(cfg.head_dropout, 0.1)))
+
+    if cfg.model_name == 'tcn_strong':
+        tuned_channels = cfg.tcn_channels
+        if tuned_channels == (32, 32, 32, 32, 32, 32, 32, 32):
+            tuned_channels = (64, 64, 64, 64, 64)
+        tuned_kernel = cfg.tcn_kernel_size if cfg.tcn_kernel_size != 7 else 5
+        tuned_dropout = max(cfg.dropout, 0.1)
+        return _build_tcn(
+            replace(
+                cfg,
+                causal=False,
+                norm_type='batch',
+                pooling='meanmax',
+                head_dropout=max(cfg.head_dropout, 0.1),
+                tcn_channels=tuned_channels,
+                tcn_kernel_size=tuned_kernel,
+                dropout=tuned_dropout,
+            )
+        )
 
     if cfg.model_name == 'smoothed_tcn':
         return _build_tcn(
