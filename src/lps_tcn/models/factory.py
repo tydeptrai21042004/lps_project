@@ -20,7 +20,9 @@ MODEL_CHOICES = (
     'tcn_bn',
     'tcn_attn',
     'tcn_strong',
+    'hybrid_dilated_tcn',
     'smoothed_tcn',
+    'blurpool_tcn',
     'gaussian_tcn',
     'hamming_tcn',
     'savgol_tcn',
@@ -68,6 +70,7 @@ class ModelConfig:
     fcn_kernel_sizes: tuple[int, ...] = (11, 7, 5)
     smoothed_tcn_smoother: str = 'moving_avg'
     smoothed_tcn_kernel_size: int = 5
+    tcn_dilations: tuple[int, ...] = ()
     use_weight_norm: bool = False
     norm_type: str = 'none'
     pooling: str = 'mean'
@@ -86,6 +89,7 @@ def _build_tcn(
     smoothed_smoother_type: str = 'moving_avg',
     smoothed_kernel_size: int = 5,
 ) -> nn.Module:
+    dilation_schedule = list(cfg.tcn_dilations) if cfg.tcn_dilations else None
     return TCNBackboneClassifier(
         input_channels=cfg.input_channels,
         n_classes=cfg.n_classes,
@@ -101,6 +105,7 @@ def _build_tcn(
         smoothed=smoothed,
         smoothed_smoother_type=smoothed_smoother_type,
         smoothed_kernel_size=smoothed_kernel_size,
+        dilation_schedule=dilation_schedule,
     )
 
 
@@ -132,6 +137,13 @@ def build_model(cfg: ModelConfig) -> nn.Module:
                 dropout=tuned_dropout,
             )
         )
+
+    if cfg.model_name == 'hybrid_dilated_tcn':
+        dilations = cfg.tcn_dilations
+        if not dilations:
+            base_pattern = (1, 2, 5)
+            dilations = tuple(base_pattern[i % len(base_pattern)] for i in range(len(cfg.tcn_channels)))
+        return _build_tcn(replace(cfg, tcn_dilations=dilations))
 
     if cfg.model_name == 'smoothed_tcn':
         return _build_tcn(
@@ -189,7 +201,7 @@ def build_model(cfg: ModelConfig) -> nn.Module:
         )
         return _build_tcn(cfg, frontend=frontend)
 
-    if cfg.model_name in {'gaussian_tcn', 'hamming_tcn', 'savgol_tcn', 'moving_avg_tcn'}:
+    if cfg.model_name in {'gaussian_tcn', 'hamming_tcn', 'savgol_tcn', 'moving_avg_tcn', 'blurpool_tcn'}:
         smoother_name = cfg.fixed_smoother
         if cfg.model_name == 'gaussian_tcn':
             smoother_name = 'gaussian'
@@ -199,6 +211,8 @@ def build_model(cfg: ModelConfig) -> nn.Module:
             smoother_name = 'savgol'
         elif cfg.model_name == 'moving_avg_tcn':
             smoother_name = 'moving_avg'
+        elif cfg.model_name == 'blurpool_tcn':
+            smoother_name = 'blurpool'
 
         smoother = FixedSmoother1d(
             channels=cfg.input_channels,

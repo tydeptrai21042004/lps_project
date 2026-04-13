@@ -77,3 +77,20 @@ Run a broader comparison:
 ```bash
 python compare_models.py   --dataset ecg5000   --models tcn_plain,learnable_front_tcn,bilstm,bigru,fcn,lps_conv_plus,lps_conv_plus_ms   --output-dir ./outputs/compare_ecg5000
 ```
+
+
+## Paper-supported comparison sets
+
+The comparison runner now distinguishes between:
+
+- `paper_compare`: only paper-supported baselines plus the proposal models.
+- `paper_baselines`: only literature-backed baselines.
+- `ablations`: internal engineering variants and fixed-smoother ablations that are useful for diagnostics but should not be reported as primary baselines.
+
+New paper-backed TCN-side baselines:
+
+- `hybrid_dilated_tcn`: HDC-inspired non-gridding dilation schedule baseline.
+- `smoothed_tcn`: smoothed dilated convolution baseline.
+- `blurpool_tcn`: fixed anti-aliased blurpool-style low-pass front-end baseline.
+
+A provenance manifest is saved to `model_provenance.json` for each comparison run.

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from src.lps_tcn.data import DATASET_CHOICES
+from src.lps_tcn.models.model_zoo import ABLATION_MODELS, MODEL_PAPER_SUPPORT, PAPER_BASELINE_MODELS, PROPOSAL_MODELS
 
 
 PER_RUN_COLUMNS = [
@@ -145,7 +146,7 @@ def _save_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Run a comparison suite across stronger baselines and LPS variants.')
+    parser = argparse.ArgumentParser(description='Run a comparison suite across paper-supported baselines and LPS variants.')
     parser.add_argument('--project-root', type=str, default='.')
     parser.add_argument('--data-root', type=str, default='./data')
     parser.add_argument('--output-dir', type=str, default='./outputs/compare')
@@ -153,9 +154,19 @@ def main() -> None:
     parser.add_argument(
         '--models',
         type=str,
-        default='tcn_plain,tcn_bn,tcn_attn,tcn_strong,smoothed_tcn,moving_avg_tcn,learnable_front_tcn,bilstm,bigru,fcn,lps_conv_plus,lps_conv_plus_ms',
-        help='Comma-separated model names',
+        default='',
+        help='Comma-separated model names. Leave empty to use --model-set.',
     )
+    parser.add_argument(
+        '--model-set',
+        type=str,
+        default='paper_compare',
+        choices=['paper_compare', 'paper_baselines', 'proposals', 'ablations', 'all'],
+        help='Predefined model group. paper_compare uses only paper-supported baselines plus proposal models.',
+    )
+    parser.add_argument('--allow-nonpaper-models', action='store_true', default=False)
+    parser.add_argument('--show-model-provenance', action='store_true', default=True)
+    parser.add_argument('--hide-model-provenance', dest='show_model_provenance', action='store_false')
     parser.add_argument('--seeds', type=str, default='1111,2222,3333')
     parser.add_argument('--epochs', type=int, default=30)
     parser.add_argument('--batch-size', type=int, default=64)
@@ -167,7 +178,34 @@ def main() -> None:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    models = [m.strip() for m in args.models.split(',') if m.strip()]
+    if args.show_model_provenance:
+        provenance_rows = []
+        for model in models:
+            meta = MODEL_PAPER_SUPPORT.get(model, {})
+            provenance_rows.append({
+                'model': model,
+                'kind': meta.get('kind', 'unknown'),
+                'paper': meta.get('paper', 'n/a'),
+                'note': meta.get('note', ''),
+            })
+        _print_table('Model provenance', provenance_rows, ['model', 'kind', 'paper', 'note'])
+        with (output_dir / 'model_provenance.json').open('w', encoding='utf-8') as f:
+            json.dump(provenance_rows, f, indent=2)
+
+    model_sets = {
+        'paper_compare': PAPER_BASELINE_MODELS + PROPOSAL_MODELS,
+        'paper_baselines': PAPER_BASELINE_MODELS,
+        'proposals': PROPOSAL_MODELS,
+        'ablations': ABLATION_MODELS,
+        'all': PAPER_BASELINE_MODELS + PROPOSAL_MODELS + ABLATION_MODELS,
+    }
+    models = [m.strip() for m in args.models.split(',') if m.strip()] if args.models else list(model_sets[args.model_set])
+    if not args.allow_nonpaper_models:
+        bad = [m for m in models if MODEL_PAPER_SUPPORT.get(m, {}).get('kind') == 'ablation']
+        if bad and args.model_set != 'ablations':
+            raise ValueError(
+                'The following models are marked as internal ablations rather than paper-supported baselines: ' + ', '.join(bad)
+            )
     seeds = [int(s.strip()) for s in args.seeds.split(',') if s.strip()]
 
     rows: list[dict[str, Any]] = []

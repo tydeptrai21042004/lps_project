@@ -20,7 +20,9 @@ TCN_MODEL_CHOICES = {
     'tcn_bn',
     'tcn_attn',
     'tcn_strong',
+    'hybrid_dilated_tcn',
     'smoothed_tcn',
+    'blurpool_tcn',
     'gaussian_tcn',
     'hamming_tcn',
     'savgol_tcn',
@@ -58,6 +60,10 @@ def apply_model_family_defaults(args: argparse.Namespace) -> argparse.Namespace:
         if args.dropout < 0.1:
             args.dropout = 0.1
 
+    if args.model == 'hybrid_dilated_tcn':
+        if args.channels == '32,32,32,32,32,32,32,32':
+            args.channels = '32,32,32,32,32,32,32,32'
+
     if args.model == 'lps_conv_plus_ms':
         if args.front_multiscale_kernels == '':
             args.front_multiscale_kernels = '5,9,17'
@@ -91,7 +97,7 @@ def apply_model_family_defaults(args: argparse.Namespace) -> argparse.Namespace:
         if args.class_weighting == 'auto':
             args.class_weighting = 'balanced'
         if args.model in {'lps_conv_plus', 'lps_conv_plus_ms', 'learnable_front_tcn'} and args.gate_init <= -4.0:
-            args.gate_init = -1.5
+            args.gate_init = -1.0
         if args.kernel_init == 'identity' and args.model in {'lps_conv', 'lps_conv_plus', 'lps_conv_plus_ms'}:
             args.kernel_init = 'gaussian'
         if not args.normalize_kernel_dc and args.model in {'lps_conv', 'lps_conv_plus', 'lps_conv_plus_ms'}:

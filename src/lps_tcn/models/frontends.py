@@ -38,6 +38,17 @@ def _make_savgol_full(kernel_size: int, polyorder: int = 3, device=None, dtype=N
     return torch.tensor(coeffs, device=device, dtype=out_dtype)
 
 
+def _make_blurpool_full(kernel_size: int, device=None, dtype=None) -> torch.Tensor:
+    if kernel_size % 2 == 0:
+        raise ValueError('kernel_size must be odd for blurpool smoothing')
+    row = kernel_size - 1
+    coeffs = [math.comb(row, i) for i in range(kernel_size)]
+    out_dtype = dtype if dtype is not None else torch.float32
+    w = torch.tensor(coeffs, device=device, dtype=out_dtype)
+    w = w / w.sum()
+    return w
+
+
 class SqueezeExcitation1d(nn.Module):
     def __init__(self, channels: int, reduction: int = 4) -> None:
         super().__init__()
@@ -195,6 +206,8 @@ class FixedSmoother1d(nn.Module):
             base = _make_savgol_full(kernel_size, polyorder=polyorder, dtype=torch.float32)
         elif smoother_type == 'moving_avg':
             base = torch.ones(kernel_size, dtype=torch.float32) / kernel_size
+        elif smoother_type == 'blurpool':
+            base = _make_blurpool_full(kernel_size, dtype=torch.float32)
         else:
             raise ValueError(f'Unknown smoother_type: {smoother_type}')
 

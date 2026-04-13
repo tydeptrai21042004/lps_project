@@ -232,13 +232,18 @@ class TemporalConvNet(nn.Module):
         norm_type: str = "none",
         block_cls: type[nn.Module] = TemporalBlock,
         block_kwargs: dict | None = None,
+        dilation_schedule: list[int] | tuple[int, ...] | None = None,
     ) -> None:
         super().__init__()
         layers = []
         block_kwargs = block_kwargs or {}
 
-        for i, out_channels in enumerate(channels):
-            dilation_size = 2 ** i
+        if dilation_schedule is None:
+            dilation_schedule = [2 ** i for i in range(len(channels))]
+        if len(dilation_schedule) != len(channels):
+            raise ValueError('dilation_schedule must have the same length as channels')
+
+        for i, (out_channels, dilation_size) in enumerate(zip(channels, dilation_schedule)):
             in_channels = num_inputs if i == 0 else channels[i - 1]
             layers.append(
                 block_cls(
@@ -246,7 +251,7 @@ class TemporalConvNet(nn.Module):
                     out_channels,
                     kernel_size,
                     stride=1,
-                    dilation=dilation_size,
+                    dilation=int(dilation_size),
                     dropout=dropout,
                     causal=causal,
                     use_weight_norm=use_weight_norm,
@@ -279,6 +284,7 @@ class TCNBackboneClassifier(nn.Module):
         smoothed: bool = False,
         smoothed_smoother_type: str = "moving_avg",
         smoothed_kernel_size: int = 5,
+        dilation_schedule: list[int] | tuple[int, ...] | None = None,
     ) -> None:
         super().__init__()
         self.frontend = frontend if frontend is not None else nn.Identity()
@@ -301,6 +307,7 @@ class TCNBackboneClassifier(nn.Module):
             norm_type=norm_type,
             block_cls=block_cls,
             block_kwargs=block_kwargs,
+            dilation_schedule=dilation_schedule,
         )
 
         self.pooling = pooling
