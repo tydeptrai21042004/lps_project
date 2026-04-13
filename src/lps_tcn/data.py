@@ -19,12 +19,61 @@ VISION_DATASETS = (
 )
 
 ARCHIVE_DATASETS: dict[str, str] = {
+    'arrowhead': 'ArrowHead',
+    'basicmotions': 'BasicMotions',
+    'coffee': 'Coffee',
+    'earthquakes': 'Earthquakes',
+    'ecg200': 'ECG200',
     'ecg5000': 'ECG5000',
     'electricdevices': 'ElectricDevices',
+    'facefour': 'FaceFour',
     'forda': 'FordA',
-    'wafer': 'Wafer',
+    'gunpoint': 'GunPoint',
+    'italy_power_demand': 'ItalyPowerDemand',
     'two_patterns': 'TwoPatterns',
-    'basicmotions': 'BasicMotions',
+    'wafer': 'Wafer',
+}
+
+DATASET_GROUPS: dict[str, tuple[str, ...]] = {
+    'quick_archive': ('ecg200', 'ecg5000', 'gunpoint'),
+    'fair_ucr_core': (
+        'ecg200',
+        'ecg5000',
+        'gunpoint',
+        'italy_power_demand',
+        'forda',
+        'wafer',
+        'electricdevices',
+        'two_patterns',
+    ),
+    'fair_ucr_extended': (
+        'arrowhead',
+        'coffee',
+        'earthquakes',
+        'ecg200',
+        'ecg5000',
+        'facefour',
+        'forda',
+        'gunpoint',
+        'italy_power_demand',
+        'wafer',
+    ),
+    'fair_multivariate': ('basicmotions',),
+    'fair_all': (
+        'arrowhead',
+        'basicmotions',
+        'coffee',
+        'earthquakes',
+        'ecg200',
+        'ecg5000',
+        'electricdevices',
+        'facefour',
+        'forda',
+        'gunpoint',
+        'italy_power_demand',
+        'two_patterns',
+        'wafer',
+    ),
 }
 
 SYNTHETIC_DATASETS = (
@@ -265,8 +314,8 @@ def _load_archive_dataset(data_root: str, dataset_name: str):
         from aeon.datasets import load_classification
     except Exception as e:  # pragma: no cover - optional dependency path
         raise ImportError(
-            'aeon is required for archive time-series datasets. Install aeon to use ECG5000, '
-            'ElectricDevices, FordA, Wafer, TwoPatterns, or BasicMotions.'
+            'aeon is required for archive time-series datasets. Install aeon to use archive datasets '
+            'such as ECG5000, ECG200, GunPoint, ItalyPowerDemand, FordA, Wafer, TwoPatterns, and BasicMotions.'
         ) from e
 
     train_payload = load_classification(

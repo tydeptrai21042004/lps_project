@@ -10,7 +10,9 @@ if str(ROOT) not in sys.path:
 
 import torch
 
+from compare_models import _resolve_datasets
 from train import apply_model_family_defaults, make_parser
+from src.lps_tcn.data import DATASET_GROUPS, DATASET_CHOICES
 from src.lps_tcn.models.factory import ModelConfig, build_model
 from src.lps_tcn.models.model_zoo import MODEL_PAPER_SUPPORT, PAPER_BASELINE_MODELS, PROPOSAL_MODELS
 
@@ -55,3 +57,19 @@ class PaperBaselineTests(unittest.TestCase):
         self.assertEqual(args.class_weighting, 'balanced')
         self.assertEqual(args.norm_type, 'none')
         self.assertEqual(args.gate_init, -1.0)
+
+    def test_new_archive_datasets_are_exposed(self) -> None:
+        for dataset_name in ['ecg200', 'gunpoint', 'italy_power_demand', 'coffee']:
+            self.assertIn(dataset_name, DATASET_CHOICES)
+
+    def test_dataset_group_resolution_deduplicates_and_preserves_order(self) -> None:
+        args = type('Args', (), {
+            'dataset': 'ecg5000',
+            'datasets': 'gunpoint,ecg5000',
+            'dataset_set': 'quick_archive',
+        })()
+        datasets = _resolve_datasets(args)
+        expected = list(DATASET_GROUPS['quick_archive'])
+        self.assertEqual(datasets[: len(expected)], expected)
+        self.assertEqual(datasets.count('ecg5000'), 1)
+        self.assertIn('gunpoint', datasets)
