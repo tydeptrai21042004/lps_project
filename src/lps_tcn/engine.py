@@ -24,6 +24,7 @@ class EpochMetrics:
 class ShiftMetrics:
     mean_logit_l2: float
     mean_prediction_consistency: float
+    per_shift: dict[int, dict[str, float]]
 
 
 @dataclass
@@ -327,10 +328,12 @@ def evaluate_shift_stability(
     max_batches: int = 20,
 ) -> ShiftMetrics:
     model.eval()
+    shifts = tuple(int(s) for s in shifts)
     l2_sum = 0.0
     consistency_sum = 0.0
     count = 0
     batches_seen = 0
+    per_shift_stats = {int(shift): {'logit_l2_sum': 0.0, 'consistency_sum': 0.0, 'count': 0} for shift in shifts}
 
     for x, _ in loader:
         x = x.to(device, non_blocking=True)
@@ -343,17 +346,32 @@ def evaluate_shift_stability(
             logits = model(shifted)
             pred = logits.argmax(dim=1)
 
-            l2_sum += torch.norm(ref_logits - logits, dim=1).mean().item()
-            consistency_sum += (pred == ref_pred).float().mean().item()
+            batch_l2 = torch.norm(ref_logits - logits, dim=1).mean().item()
+            batch_consistency = (pred == ref_pred).float().mean().item()
+            l2_sum += batch_l2
+            consistency_sum += batch_consistency
             count += 1
+
+            per_shift_stats[int(shift)]['logit_l2_sum'] += batch_l2
+            per_shift_stats[int(shift)]['consistency_sum'] += batch_consistency
+            per_shift_stats[int(shift)]['count'] += 1
 
         batches_seen += 1
         if batches_seen >= max_batches:
             break
 
+    per_shift = {}
+    for shift, stats in per_shift_stats.items():
+        denom = max(int(stats['count']), 1)
+        per_shift[int(shift)] = {
+            'mean_logit_l2': float(stats['logit_l2_sum'] / denom),
+            'mean_prediction_consistency': float(stats['consistency_sum'] / denom),
+        }
+
     return ShiftMetrics(
         mean_logit_l2=l2_sum / max(count, 1),
         mean_prediction_consistency=consistency_sum / max(count, 1),
+        per_shift=per_shift,
     )
 
 

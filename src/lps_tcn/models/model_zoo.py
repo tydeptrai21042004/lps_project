@@ -12,8 +12,6 @@ PAPER_BASELINE_MODELS = (
 
 PROPOSAL_MODELS = (
     "lps_conv",
-    "lps_conv_plus",
-    "lps_conv_plus_ms",
 )
 
 ABLATION_MODELS = (
@@ -69,16 +67,6 @@ MODEL_PAPER_SUPPORT = {
         "kind": "proposal",
         "paper": "This paper",
         "note": "single-stage symmetric linear-phase front end",
-    },
-    "lps_conv_plus": {
-        "kind": "proposal",
-        "paper": "This paper",
-        "note": "main two-stage linear-phase front end",
-    },
-    "lps_conv_plus_ms": {
-        "kind": "proposal",
-        "paper": "This paper",
-        "note": "multiscale extension of the proposed front end",
     },
     "learnable_front_tcn": {
         "kind": "ablation",

@@ -1,6 +1,6 @@
 # LPS-TCN comparison project
 
-This project now supports both the original vision-as-sequence benchmarks and a stronger time-series path with improved baselines and an enhanced proposal model.
+This project is now aligned to the paper-facing **single-stage `lps_conv` proposal**. The comparison code keeps the same paper baselines, but removes the extra internal proposal-family variants from the public benchmark flow so the reported results stay focused on the method described in the manuscript.
 
 ## Included datasets
 
@@ -42,10 +42,8 @@ This project now supports both the original vision-as-sequence benchmarks and a 
 - `moving_avg_tcn`
 - `learnable_front_tcn`
 
-### Learnable front-end models
+### Paper proposal
 - `lps_conv`
-- `lps_conv_plus`
-- `lps_conv_plus_ms`
 
 ### Non-TCN baselines
 - `lstm`
@@ -62,10 +60,9 @@ This project now supports both the original vision-as-sequence benchmarks and a 
 - stronger RNN baselines with mean/max/attention pooling and optional input projection
 - stronger FCN baseline
 - unconstrained learnable front-end baseline (`learnable_front_tcn`)
-- enhanced proposal variant with multiscale symmetric branches, channel attention, and per-channel residual gating (`lps_conv_plus_ms`)
-- more unit tests covering datasets, dtypes, pooling, and new models
 - comparison runner now keeps going when one model fails
 - comparison runner supports multi-dataset evaluation and predefined fair dataset groups
+- public paper comparison flow now keeps only the single-stage `lps_conv` proposal
 
 ## Quick start
 
@@ -74,10 +71,10 @@ pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
 
-Train the enhanced proposal on ECG5000:
+Train the paper proposal on ECG5000:
 
 ```bash
-python train.py   --dataset ecg5000   --model lps_conv_plus_ms   --output-dir ./outputs/lps_conv_plus_ms_ecg5000
+python train.py   --dataset ecg5000   --model lps_conv   --output-dir ./outputs/lps_conv_ecg5000
 ```
 
 Run a broader comparison on one dataset:
@@ -104,23 +101,21 @@ Run a custom multi-dataset benchmark:
 python compare_models.py   --datasets ecg200,ecg5000,gunpoint,italy_power_demand   --model-set paper_compare   --output-dir ./outputs/compare_custom_ucr
 ```
 
-
 ## Paper-supported comparison sets
 
-The comparison runner now distinguishes between:
+The comparison runner distinguishes between:
 
-- `paper_compare`: only paper-supported baselines plus the proposal models.
+- `paper_compare`: only paper-supported baselines plus the single-stage proposal.
 - `paper_baselines`: only literature-backed baselines.
-- `ablations`: internal engineering variants and fixed-smoother ablations that are useful for diagnostics but should not be reported as primary baselines.
+- `ablations`: internal engineering variants and fixed-smoother ablations useful for diagnostics but not for the main paper table.
 
-New paper-backed TCN-side baselines:
+Paper-backed TCN-side baselines:
 
 - `hybrid_dilated_tcn`: HDC-inspired non-gridding dilation schedule baseline.
 - `smoothed_tcn`: smoothed dilated convolution baseline.
 - `blurpool_tcn`: fixed anti-aliased blurpool-style low-pass front-end baseline.
 
 A provenance manifest is saved to `model_provenance.json` for each comparison run.
-
 
 ## Recommended fair test sets
 

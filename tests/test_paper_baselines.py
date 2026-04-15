@@ -22,6 +22,9 @@ class PaperBaselineTests(unittest.TestCase):
         for model in PAPER_BASELINE_MODELS + PROPOSAL_MODELS:
             self.assertNotEqual(MODEL_PAPER_SUPPORT[model]['kind'], 'ablation')
 
+    def test_single_stage_lpsconv_is_the_only_public_proposal(self) -> None:
+        self.assertEqual(PROPOSAL_MODELS, ('lps_conv',))
+
     def test_hybrid_dilated_tcn_forward_shape(self) -> None:
         model = build_model(
             ModelConfig(
@@ -51,12 +54,13 @@ class PaperBaselineTests(unittest.TestCase):
         y = model(torch.randn(3, 2, 64))
         self.assertEqual(tuple(y.shape), (3, 4))
 
-    def test_archive_defaults_strengthen_proposal_backbone(self) -> None:
-        args = make_parser().parse_args(['--model', 'lps_conv_plus', '--dataset', 'ecg5000'])
+    def test_archive_defaults_strengthen_single_stage_lpsconv(self) -> None:
+        args = make_parser().parse_args(['--model', 'lps_conv', '--dataset', 'ecg5000'])
         args = apply_model_family_defaults(args)
         self.assertEqual(args.class_weighting, 'balanced')
         self.assertEqual(args.norm_type, 'none')
-        self.assertEqual(args.gate_init, -1.0)
+        self.assertEqual(args.kernel_init, 'gaussian')
+        self.assertTrue(args.normalize_kernel_dc)
 
     def test_new_archive_datasets_are_exposed(self) -> None:
         for dataset_name in ['ecg200', 'gunpoint', 'italy_power_demand', 'coffee']:

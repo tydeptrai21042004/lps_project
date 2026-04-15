@@ -20,7 +20,7 @@ torch.set_num_threads(1)
 from src.lps_tcn.data import build_sequence_loaders
 from src.lps_tcn.engine import run_epoch
 from src.lps_tcn.models.factory import MODEL_CHOICES, ModelConfig, build_model
-from src.lps_tcn.models.frontends import FixedSmoother1d, LPSConvPlus
+from src.lps_tcn.models.frontends import FixedSmoother1d, LPSConv
 from src.lps_tcn.models.tcn import TemporalConv1d
 from src.lps_tcn.utils import set_seed
 
@@ -67,6 +67,29 @@ class TrainingStabilityTests(unittest.TestCase):
         y = torch.randint(0, n_classes, (batches * batch_size,))
         return DataLoader(TensorDataset(x, y), batch_size=batch_size, shuffle=False)
 
+    def test_parse_shifts_deduplicates_and_preserves_order(self) -> None:
+        from train import parse_shifts
+        self.assertEqual(parse_shifts('1,2,2,4,8'), (1, 2, 4, 8))
+
+    def test_shift_stability_reports_per_shift_metrics(self) -> None:
+        from src.lps_tcn.engine import evaluate_shift_stability
+        loader = self._make_loader(batches=2, batch_size=4, seq_len=32, n_classes=3)
+        model = build_model(
+            ModelConfig(
+                model_name='tcn_plain',
+                input_channels=1,
+                n_classes=3,
+                tcn_channels=(8, 8),
+                tcn_kernel_size=5,
+                dropout=0.0,
+            )
+        ).to(self.device)
+        metrics = evaluate_shift_stability(model, loader, self.device, shifts=(1, 3), max_batches=2)
+        self.assertEqual(sorted(metrics.per_shift.keys()), [1, 3])
+        self.assertIn('mean_logit_l2', metrics.per_shift[1])
+        self.assertIn('mean_prediction_consistency', metrics.per_shift[3])
+
+
     def test_parser_defaults_use_safe_training_settings(self) -> None:
         args = make_parser().parse_args([])
         self.assertFalse(args.use_weight_norm)
@@ -76,13 +99,13 @@ class TrainingStabilityTests(unittest.TestCase):
         self.assertEqual(args.max_consecutive_skips, 10)
         self.assertEqual(args.class_weighting, 'auto')
         self.assertEqual(args.norm_type, 'none')
+        self.assertEqual(args.model, 'lps_conv')
 
-    def test_family_defaults_upgrade_rnn_and_ms_model(self) -> None:
-        args = make_parser().parse_args(['--model', 'lps_conv_plus_ms'])
+    def test_family_defaults_upgrade_rnn_and_single_stage_lpsconv(self) -> None:
+        args = make_parser().parse_args(['--model', 'lps_conv', '--dataset', 'ecg5000'])
         args = apply_model_family_defaults(args)
-        self.assertEqual(args.front_multiscale_kernels, '5,9,17')
-        self.assertTrue(args.front_use_se)
-        self.assertTrue(args.front_per_channel_gate)
+        self.assertEqual(args.kernel_init, 'gaussian')
+        self.assertTrue(args.normalize_kernel_dc)
 
         rnn_args = make_parser().parse_args(['--model', 'lstm', '--rnn-pooling', 'last'])
         rnn_args = apply_model_family_defaults(rnn_args)
@@ -210,20 +233,11 @@ class TrainingStabilityTests(unittest.TestCase):
         self.assertTrue(abs(float(xb.mean())) < 0.5)
         self.assertEqual(yb.ndim, 1)
 
-    def test_multiscale_lps_conv_plus_preserves_shape(self) -> None:
-        module = LPSConvPlus(
-            channels=3,
-            kernel_size1=5,
-            kernel_size2=5,
-            branch_kernel_sizes=(5, 9, 13),
-            use_se=True,
-            per_channel_gate=True,
-            branch_dropout=0.1,
-        )
+    def test_single_stage_lps_conv_preserves_shape(self) -> None:
+        module = LPSConv(channels=3, kernel_size=5, causal=False, residual=True, init_mode='gaussian', normalize_kernel_dc=True)
         x = torch.randn(2, 3, 80)
         y = module(x)
         self.assertEqual(tuple(y.shape), tuple(x.shape))
-        self.assertEqual(tuple(module.beta.shape), (1, 3, 1))
 
     def test_temporal_conv_causal_flag_changes_future_leakage(self) -> None:
         x = torch.zeros(1, 1, 7)

@@ -5,13 +5,7 @@ from dataclasses import dataclass, replace
 import torch.nn as nn
 
 from .baselines import FCNBaseline, GRUClassifier, LSTMClassifier
-from .frontends import (
-    FixedSmoother1d,
-    FrontendWithResidual,
-    LPSConv,
-    LPSConvPlus,
-    LearnableDepthwiseConv1d,
-)
+from .frontends import FixedSmoother1d, FrontendWithResidual, LPSConv, LearnableDepthwiseConv1d
 from .tcn import TCNBackboneClassifier
 
 
@@ -29,8 +23,6 @@ MODEL_CHOICES = (
     'moving_avg_tcn',
     'learnable_front_tcn',
     'lps_conv',
-    'lps_conv_plus',
-    'lps_conv_plus_ms',
     'lstm',
     'bilstm',
     'gru',
@@ -41,7 +33,7 @@ MODEL_CHOICES = (
 
 @dataclass
 class ModelConfig:
-    model_name: str = 'lps_conv_plus'
+    model_name: str = 'lps_conv'
     input_channels: int = 1
     n_classes: int = 10
     tcn_channels: tuple[int, ...] = (32, 32, 32, 32, 32, 32, 32, 32)
@@ -165,27 +157,6 @@ def build_model(cfg: ModelConfig) -> nn.Module:
         )
         return _build_tcn(cfg, frontend=frontend)
 
-    if cfg.model_name in {'lps_conv_plus', 'lps_conv_plus_ms'}:
-        branch_kernels: tuple[int, ...] = cfg.front_multiscale_kernels if cfg.model_name == 'lps_conv_plus_ms' else ()
-        frontend = LPSConvPlus(
-            channels=cfg.input_channels,
-            kernel_size1=cfg.front_kernel,
-            kernel_size2=cfg.front_kernel2,
-            h=cfg.front_h,
-            causal=cfg.causal,
-            use_relu=cfg.use_relu,
-            use_pointwise=True,
-            dc_mode=cfg.dc_mode,
-            residual=cfg.front_residual,
-            gate_init=cfg.gate_init,
-            kernel_init=cfg.kernel_init,
-            normalize_kernel_dc=cfg.normalize_kernel_dc,
-            branch_kernel_sizes=branch_kernels,
-            use_se=cfg.front_use_se or cfg.model_name == 'lps_conv_plus_ms',
-            per_channel_gate=cfg.front_per_channel_gate or cfg.model_name == 'lps_conv_plus_ms',
-            branch_dropout=cfg.front_branch_dropout,
-        )
-        return _build_tcn(cfg, frontend=frontend)
 
     if cfg.model_name == 'learnable_front_tcn':
         frontend = FrontendWithResidual(

@@ -29,8 +29,6 @@ TCN_MODEL_CHOICES = {
     'moving_avg_tcn',
     'learnable_front_tcn',
     'lps_conv',
-    'lps_conv_plus',
-    'lps_conv_plus_ms',
 }
 
 
@@ -39,6 +37,21 @@ def parse_channels(text: str) -> tuple[int, ...]:
     if not values:
         raise ValueError('Expected a comma-separated list of integers')
     return tuple(values)
+
+
+def parse_shifts(text: str) -> tuple[int, ...]:
+    values = tuple(int(v.strip()) for v in text.split(',') if v.strip())
+    if not values:
+        raise ValueError('Expected at least one shift value')
+    if any(v < 0 for v in values):
+        raise ValueError('Shift values must be non-negative integers')
+    deduped = []
+    seen = set()
+    for value in values:
+        if value not in seen:
+            deduped.append(value)
+            seen.add(value)
+    return tuple(deduped)
 
 
 def apply_model_family_defaults(args: argparse.Namespace) -> argparse.Namespace:
@@ -64,14 +77,6 @@ def apply_model_family_defaults(args: argparse.Namespace) -> argparse.Namespace:
         if args.channels == '32,32,32,32,32,32,32,32':
             args.channels = '32,32,32,32,32,32,32,32'
 
-    if args.model == 'lps_conv_plus_ms':
-        if args.front_multiscale_kernels == '':
-            args.front_multiscale_kernels = '5,9,17'
-        args.front_use_se = True
-        args.front_per_channel_gate = True
-        if args.front_branch_dropout < 0.05:
-            args.front_branch_dropout = 0.05
-
     if args.model in {'tcn_bn', 'tcn_attn', 'tcn_strong'}:
         if args.norm_type == 'none':
             args.norm_type = 'batch'
@@ -96,11 +101,11 @@ def apply_model_family_defaults(args: argparse.Namespace) -> argparse.Namespace:
     if args.dataset in ARCHIVE_DATASETS and args.model in TCN_MODEL_CHOICES:
         if args.class_weighting == 'auto':
             args.class_weighting = 'balanced'
-        if args.model in {'lps_conv_plus', 'lps_conv_plus_ms', 'learnable_front_tcn'} and args.gate_init <= -4.0:
+        if args.model == 'learnable_front_tcn' and args.gate_init <= -4.0:
             args.gate_init = -1.0
-        if args.kernel_init == 'identity' and args.model in {'lps_conv', 'lps_conv_plus', 'lps_conv_plus_ms'}:
+        if args.kernel_init == 'identity' and args.model == 'lps_conv':
             args.kernel_init = 'gaussian'
-        if not args.normalize_kernel_dc and args.model in {'lps_conv', 'lps_conv_plus', 'lps_conv_plus_ms'}:
+        if not args.normalize_kernel_dc and args.model == 'lps_conv':
             args.normalize_kernel_dc = True
 
     if args.dataset in {'ecg5000', 'synthetic_sines', 'synthetic_shiftmix', 'synthetic_multiscale'} and args.epochs < 30:
@@ -166,7 +171,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument('--val-ratio', type=float, default=0.1)
     parser.add_argument('--permute', action='store_true')
 
-    parser.add_argument('--model', type=str, default='lps_conv_plus', choices=MODEL_CHOICES)
+    parser.add_argument('--model', type=str, default='lps_conv', choices=MODEL_CHOICES)
     parser.add_argument('--channels', type=str, default='32,32,32,32,32,32,32,32')
     parser.add_argument('--tcn-kernel-size', type=int, default=7)
     parser.add_argument('--dropout', type=float, default=0.1)
@@ -223,6 +228,8 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument('--head-dropout', type=float, default=0.0)
 
     parser.add_argument('--shift-batches', type=int, default=20)
+    parser.add_argument('--shift-values', type=str, default='1,2,4')
+    parser.add_argument('--run-tag', type=str, default='')
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--debug-every', type=int, default=50)
     parser.add_argument('--debug-max-batches', type=int, default=10)
@@ -312,6 +319,8 @@ def main() -> None:
     scheduler = None
     if args.scheduler == 'cosine':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    shift_values = parse_shifts(args.shift_values)
 
     param_count = count_parameters(model)
     csv_logger = CSVLogger(output_dir / 'history.csv', overwrite=True)
@@ -405,7 +414,13 @@ def main() -> None:
     ckpt = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(ckpt['model_state_dict'])
     test_metrics = evaluate(model, data.test_loader, criterion, device)
-    shift_metrics = evaluate_shift_stability(model, data.test_loader, device, max_batches=args.shift_batches)
+    shift_metrics = evaluate_shift_stability(
+        model,
+        data.test_loader,
+        device,
+        shifts=shift_values,
+        max_batches=args.shift_batches,
+    )
     diagnostics = collect_frontend_diagnostics(model)
 
     summary = {
@@ -420,6 +435,10 @@ def main() -> None:
         'shift_mean_logit_l2': shift_metrics.mean_logit_l2,
         'shift_prediction_consistency': shift_metrics.mean_prediction_consistency,
         'parameter_count': param_count,
+        'run_tag': args.run_tag,
+        'display_name': args.run_tag if args.run_tag else args.model,
+        'shift_values': list(shift_values),
+        'shift_by_magnitude': {str(k): v for k, v in shift_metrics.per_shift.items()},
         'config': vars(args),
         'data': {
             'dataset_name': data.dataset_name,

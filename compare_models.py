@@ -252,7 +252,7 @@ def _print_available_datasets() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Run a comparison suite across paper-supported baselines and LPS variants.')
+    parser = argparse.ArgumentParser(description='Run a comparison suite across paper-supported baselines and the single-stage LPSConv proposal.')
     parser.add_argument('--project-root', type=str, default='.')
     parser.add_argument('--data-root', type=str, default='./data')
     parser.add_argument('--output-dir', type=str, default='./outputs/compare')
@@ -282,7 +282,7 @@ def main() -> None:
         type=str,
         default='paper_compare',
         choices=['paper_compare', 'paper_baselines', 'proposals', 'ablations', 'all'],
-        help='Predefined model group. paper_compare uses only paper-supported baselines plus proposal models.',
+        help='Predefined model group. paper_compare uses only paper-supported baselines plus the single-stage proposal.',
     )
     parser.add_argument('--allow-nonpaper-models', action='store_true', default=False)
     parser.add_argument('--show-model-provenance', action='store_true', default=True)
